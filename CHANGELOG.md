@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] - 2026-05-01
+
+### Added
+
+- **Streaming progress in `/ollama:status`** — running jobs now show a "Last update" line with the most recent progress message. Disk writes are throttled (every 2s within a phase; immediate on phase change) to avoid FS pressure on token streams.
+- **`docs/API.md`** — defines the public vs internal surface for v1.0+: CLI flags, env vars, job-state JSON shape, hook contract, slash-command names are public. Library exports under `lib/` are internal.
+
+### Changed
+
+- Job records now carry an additive `lastMessage` field. Pre-existing consumers continue to work unchanged.
+
+### Notes
+
+- v0.9.0 is the v1.0 release candidate. Phase 5 (marketplace publication + v1.0 tag) is the only work remaining.
+- Deferred from this release: review cache (3.5) — defer to v1.x pending real-world demand. Gemma4 adversarial schema drift remains documented as a caveat in `docs/MODELS.md`.
+
 ## [0.8.0] - 2026-04-30
 
 ### Added

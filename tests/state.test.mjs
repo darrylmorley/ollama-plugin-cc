@@ -103,3 +103,29 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
       .sort()
   );
 });
+
+import { createJobProgressUpdater } from "../plugins/ollama/scripts/lib/tracked-jobs.mjs";
+import { listJobs, upsertJob } from "../plugins/ollama/scripts/lib/state.mjs";
+
+test("createJobProgressUpdater records lastMessage on phase change", () => {
+  const cwd = makeTempDir();
+  upsertJob(cwd, { id: "j1", status: "running" });
+  const update = createJobProgressUpdater(cwd, "j1");
+
+  update({ phase: "starting", message: "first message" });
+  const job1 = listJobs(cwd).find((j) => j.id === "j1");
+  assert.equal(job1.phase, "starting");
+  assert.equal(job1.lastMessage, "first message");
+});
+
+test("createJobProgressUpdater throttles message-only updates within phase", () => {
+  const cwd = makeTempDir();
+  upsertJob(cwd, { id: "j2", status: "running" });
+  const update = createJobProgressUpdater(cwd, "j2");
+
+  update({ phase: "running", message: "first" });
+  // Same phase, immediate second message — should be throttled (not written).
+  update({ message: "second-fast" });
+  const job = listJobs(cwd).find((j) => j.id === "j2");
+  assert.equal(job.lastMessage, "first", "second message should be throttled");
+});
