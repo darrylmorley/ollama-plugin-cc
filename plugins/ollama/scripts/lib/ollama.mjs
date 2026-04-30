@@ -1,187 +1,259 @@
 /**
- * @typedef {import("./app-server-protocol").AppServerNotification} AppServerNotification
- * @typedef {import("./app-server-protocol").ReviewTarget} ReviewTarget
- * @typedef {import("./app-server-protocol").ThreadItem} ThreadItem
- * @typedef {import("./app-server-protocol").ThreadResumeParams} ThreadResumeParams
- * @typedef {import("./app-server-protocol").ThreadStartParams} ThreadStartParams
- * @typedef {import("./app-server-protocol").Turn} Turn
- * @typedef {import("./app-server-protocol").UserInput} UserInput
- * @typedef {((update: string | { message: string, phase: string | null, threadId?: string | null, turnId?: string | null, stderrMessage?: string | null, logTitle?: string | null, logBody?: string | null }) => void)} ProgressReporter
- * @typedef {{
- *   threadId: string,
- *   rootThreadId: string,
- *   threadIds: Set<string>,
- *   threadTurnIds: Map<string, string>,
- *   threadLabels: Map<string, string>,
- *   turnId: string | null,
- *   bufferedNotifications: AppServerNotification[],
- *   completion: Promise<TurnCaptureState>,
- *   resolveCompletion: (state: TurnCaptureState) => void,
- *   rejectCompletion: (error: unknown) => void,
- *   finalTurn: Turn | null,
- *   completed: boolean,
- *   finalAnswerSeen: boolean,
- *   pendingCollaborations: Set<string>,
- *   activeSubagentTurns: Set<string>,
- *   completionTimer: ReturnType<typeof setTimeout> | null,
- *   lastAgentMessage: string,
- *   reviewText: string,
- *   reasoningSummary: string[],
- *   error: unknown,
- *   messages: Array<{ lifecycle: string, phase: string | null, text: string }>,
- *   fileChanges: ThreadItem[],
- *   commandExecutions: ThreadItem[],
- *   onProgress: ProgressReporter | null
- * }} TurnCaptureState
+ * Thin Ollama HTTP client.
+ *
+ * Exposes:
+ *   chat()        - async generator (stream=true) or single response (stream=false)
+ *   listModels()  - GET /api/tags
+ *   pullModel()   - POST /api/pull with progress callback
+ *   health()      - reachability check (GET /api/tags)
+ *
+ * Companion helpers (preserved from the old codex.mjs surface so companion can import them):
+ *   runReview()          - builds messages, calls chat, validates JSON output
+ *   runTask()            - builds messages, streams response, emits diff/text
+ *   getOllamaAvailability()
+ *   getOllamaAuthStatus()
+ *   getSessionRuntimeStatus()
+ *   interruptAppServerTurn()
+ *   findLatestTaskThread()
+ *   buildPersistentTaskThreadName()
+ *   parseStructuredOutput()
+ *   readOutputSchema()
+ *   DEFAULT_CONTINUE_PROMPT
+ *   TASK_THREAD_PREFIX
  */
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, OllamaAppServerClient } from "./app-server.mjs";
-import { loadBrokerSession } from "./broker-lifecycle.mjs";
-import { binaryAvailable } from "./process.mjs";
 
-const SERVICE_NAME = "claude_code_ollama_plugin";
-const TASK_THREAD_PREFIX = "Ollama Companion Task";
-const DEFAULT_CONTINUE_PROMPT =
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_CONTINUE_PROMPT =
   "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
+export const TASK_THREAD_PREFIX = "Ollama Companion Task";
 
-function cleanOllamaStderr(stderr) {
-  return stderr
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line && !line.startsWith("WARNING: proceeding, even though we could not update PATH:"))
-    .join("\n");
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+function getOllamaHost() {
+  return (process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(/\/$/, "");
 }
 
-/** @returns {ThreadStartParams} */
-function buildThreadParams(cwd, options = {}) {
-  return {
-    cwd,
-    model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only",
-    serviceName: SERVICE_NAME,
-    ephemeral: options.ephemeral ?? true,
-    experimentalRawEvents: false
-  };
-}
-
-/** @returns {ThreadResumeParams} */
-function buildResumeParams(threadId, cwd, options = {}) {
-  return {
-    threadId,
-    cwd,
-    model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
-  };
-}
-
-/** @returns {UserInput[]} */
-function buildTurnInput(prompt) {
-  return [{ type: "text", text: prompt, text_elements: [] }];
-}
-
-function shorten(text, limit = 72) {
-  const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
-  if (!normalized) {
-    return "";
-  }
-  if (normalized.length <= limit) {
-    return normalized;
-  }
-  return `${normalized.slice(0, limit - 3)}...`;
-}
-
-function looksLikeVerificationCommand(command) {
-  return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(
-    command
+function buildNotReachableError(host) {
+  return new Error(
+    `Ollama not reachable at ${host}. Run \`ollama serve\` or set OLLAMA_HOST.`
   );
 }
 
-function buildTaskThreadName(prompt) {
-  const excerpt = shorten(prompt, 56);
-  return excerpt ? `${TASK_THREAD_PREFIX}: ${excerpt}` : TASK_THREAD_PREFIX;
-}
-
-function extractThreadId(message) {
-  return message?.params?.threadId ?? null;
-}
-
-function extractTurnId(message) {
-  if (message?.params?.turnId) {
-    return message.params.turnId;
-  }
-  if (message?.params?.turn?.id) {
-    return message.params.turn.id;
-  }
-  return null;
-}
-
-function collectTouchedFiles(fileChanges) {
-  const paths = new Set();
-  for (const fileChange of fileChanges) {
-    for (const change of fileChange.changes ?? []) {
-      if (change.path) {
-        paths.add(change.path);
-      }
+/**
+ * Low-level fetch wrapper. Throws a friendly error when the server is down.
+ * @param {string} path
+ * @param {RequestInit} [init]
+ * @returns {Promise<Response>}
+ */
+async function ollamaFetch(path, init = {}) {
+  const host = getOllamaHost();
+  const url = `${host}${path}`;
+  try {
+    const response = await fetch(url, init);
+    return response;
+  } catch (error) {
+    // Network-level failures (ECONNREFUSED, etc.) surface as TypeError
+    if (error instanceof TypeError || error?.code === "ECONNREFUSED") {
+      throw buildNotReachableError(host);
     }
+    throw error;
   }
-  return [...paths];
-}
-
-function normalizeReasoningText(text) {
-  return String(text ?? "").replace(/\s+/g, " ").trim();
-}
-
-function extractReasoningSections(value) {
-  if (!value) {
-    return [];
-  }
-
-  if (typeof value === "string") {
-    const normalized = normalizeReasoningText(value);
-    return normalized ? [normalized] : [];
-  }
-
-  if (Array.isArray(value)) {
-    return value.flatMap((entry) => extractReasoningSections(entry));
-  }
-
-  if (typeof value === "object") {
-    if (typeof value.text === "string") {
-      return extractReasoningSections(value.text);
-    }
-    if ("summary" in value) {
-      return extractReasoningSections(value.summary);
-    }
-    if ("content" in value) {
-      return extractReasoningSections(value.content);
-    }
-    if ("parts" in value) {
-      return extractReasoningSections(value.parts);
-    }
-  }
-
-  return [];
-}
-
-function mergeReasoningSections(existingSections, nextSections) {
-  const merged = [];
-  for (const section of [...existingSections, ...nextSections]) {
-    const normalized = normalizeReasoningText(section);
-    if (!normalized || merged.includes(normalized)) {
-      continue;
-    }
-    merged.push(normalized);
-  }
-  return merged;
 }
 
 /**
- * @param {ProgressReporter | null | undefined} onProgress
- * @param {string | null | undefined} message
- * @param {string | null | undefined} [phase]
+ * Read an NDJSON (newline-delimited JSON) streaming response.
+ * Yields each parsed line as an object.
+ * @param {Response} response
+ * @returns {AsyncGenerator<object>}
  */
+async function* readNdjsonStream(response) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Ollama response has no readable body.");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+        if (line) {
+          yield JSON.parse(line);
+        }
+        newlineIndex = buffer.indexOf("\n");
+      }
+    }
+    // Flush any remaining bytes
+    buffer += decoder.decode();
+    const remaining = buffer.trim();
+    if (remaining) {
+      yield JSON.parse(remaining);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public HTTP client API
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/chat
+ *
+ * When stream=true (default): async generator yielding delta objects
+ *   { type: "token", content: string }
+ *   { type: "tool_call", tool_call: object }
+ *   { type: "done", message: object, stats: object }
+ *
+ * When stream=false: resolves to the full message object
+ *   { role, content, tool_calls? }
+ *
+ * @param {{
+ *   model: string,
+ *   messages: Array<{role: string, content: string}>,
+ *   tools?: Array<object>,
+ *   format?: string | object,
+ *   stream?: boolean,
+ *   signal?: AbortSignal
+ * }} params
+ */
+export async function* chat({ model, messages, tools, format, stream = true, signal } = {}) {
+  const host = getOllamaHost();
+  const url = `${host}/api/chat`;
+
+  const body = {
+    model,
+    messages,
+    stream,
+    ...(tools ? { tools } : {}),
+    ...(format !== undefined ? { format } : {})
+  };
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal
+    });
+  } catch (error) {
+    if (error instanceof TypeError || error?.code === "ECONNREFUSED") {
+      throw buildNotReachableError(host);
+    }
+    throw error;
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`Ollama /api/chat error ${response.status}: ${errorText}`);
+  }
+
+  if (!stream) {
+    // Non-streaming: response body is a single JSON object
+    const data = await response.json();
+    yield { type: "done", message: data.message ?? {}, stats: data };
+    return;
+  }
+
+  // Streaming: NDJSON lines
+  for await (const chunk of readNdjsonStream(response)) {
+    if (chunk.error) {
+      throw new Error(`Ollama streaming error: ${chunk.error}`);
+    }
+
+    const delta = chunk.message?.content;
+    const toolCalls = chunk.message?.tool_calls;
+
+    if (toolCalls && toolCalls.length > 0) {
+      for (const toolCall of toolCalls) {
+        yield { type: "tool_call", tool_call: toolCall };
+      }
+    }
+
+    if (typeof delta === "string" && delta) {
+      yield { type: "token", content: delta };
+    }
+
+    if (chunk.done) {
+      yield { type: "done", message: chunk.message ?? {}, stats: chunk };
+    }
+  }
+}
+
+/**
+ * GET /api/tags — list locally available models.
+ * @returns {Promise<Array<{name: string, modified_at: string, size: number}>>}
+ */
+export async function listModels() {
+  const response = await ollamaFetch("/api/tags");
+  if (!response.ok) {
+    throw new Error(`Ollama /api/tags error ${response.status}`);
+  }
+  const data = await response.json();
+  return data.models ?? [];
+}
+
+/**
+ * POST /api/pull — pull a model with optional progress callback.
+ * @param {string} name
+ * @param {((status: {status: string, completed?: number, total?: number}) => void) | null} [onProgress]
+ */
+export async function pullModel(name, onProgress = null) {
+  const response = await ollamaFetch("/api/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, stream: true })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`Ollama /api/pull error ${response.status}: ${errorText}`);
+  }
+
+  for await (const chunk of readNdjsonStream(response)) {
+    if (chunk.error) {
+      throw new Error(`Ollama pull error: ${chunk.error}`);
+    }
+    onProgress?.(chunk);
+  }
+}
+
+/**
+ * Health check — returns true if Ollama is reachable, false otherwise.
+ * @returns {Promise<boolean>}
+ */
+export async function health() {
+  try {
+    const response = await ollamaFetch("/api/tags");
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Companion helpers — preserve the public API surface expected by
+// ollama-companion.mjs so imports still resolve.
+// ---------------------------------------------------------------------------
+
+/** @param {string | null} [progressMessage] */
 function emitProgress(onProgress, message, phase = null, extra = {}) {
   if (!onProgress || !message) {
     return;
@@ -193,873 +265,326 @@ function emitProgress(onProgress, message, phase = null, extra = {}) {
   onProgress({ message, phase, ...extra });
 }
 
-function emitLogEvent(onProgress, options = {}) {
-  if (!onProgress) {
-    return;
-  }
+/**
+ * Inline JSON schema validator covering only what review-output.schema.json uses.
+ * Returns an array of error strings (empty means valid).
+ * @param {unknown} value
+ * @param {object} schema
+ * @param {string} [path]
+ * @returns {string[]}
+ */
+function validateSchema(value, schema, path = "") {
+  const errors = [];
 
-  onProgress({
-    message: options.message ?? "",
-    phase: options.phase ?? null,
-    stderrMessage: options.stderrMessage ?? null,
-    logTitle: options.logTitle ?? null,
-    logBody: options.logBody ?? null
-  });
-}
-
-function labelForThread(state, threadId) {
-  if (!threadId || threadId === state.rootThreadId || threadId === state.threadId) {
-    return null;
-  }
-  return state.threadLabels.get(threadId) ?? threadId;
-}
-
-function registerThread(state, threadId, options = {}) {
-  if (!threadId) {
-    return;
-  }
-
-  state.threadIds.add(threadId);
-  const label =
-    options.threadName ??
-    options.name ??
-    options.agentNickname ??
-    options.agentRole ??
-    state.threadLabels.get(threadId) ??
-    null;
-  if (label) {
-    state.threadLabels.set(threadId, label);
-  }
-}
-
-function describeStartedItem(state, item) {
-  switch (item.type) {
-    case "enteredReviewMode":
-      return { message: `Reviewer started: ${item.review}`, phase: "reviewing" };
-    case "commandExecution":
-      return {
-        message: `Running command: ${shorten(item.command, 96)}`,
-        phase: looksLikeVerificationCommand(item.command) ? "verifying" : "running"
-      };
-    case "fileChange":
-      return { message: `Applying ${item.changes.length} file change(s).`, phase: "editing" };
-    case "mcpToolCall":
-      return { message: `Calling ${item.server}/${item.tool}.`, phase: "investigating" };
-    case "dynamicToolCall":
-      return { message: `Running tool: ${item.tool}.`, phase: "investigating" };
-    case "collabAgentToolCall": {
-      const subagents = (item.receiverThreadIds ?? []).map((threadId) => labelForThread(state, threadId) ?? threadId);
-      const summary =
-        subagents.length > 0
-          ? `Starting subagent ${subagents.join(", ")} via collaboration tool: ${item.tool}.`
-          : `Starting collaboration tool: ${item.tool}.`;
-      return { message: summary, phase: "investigating" };
+  if (schema.type === "object") {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      errors.push(`${path || "root"}: expected object`);
+      return errors;
     }
-    case "webSearch":
-      return { message: `Searching: ${shorten(item.query, 96)}`, phase: "investigating" };
-    default:
-      return null;
+
+    if (schema.required) {
+      for (const key of schema.required) {
+        if (!(key in value)) {
+          errors.push(`${path || "root"}: missing required field "${key}"`);
+        }
+      }
+    }
+
+    if (schema.properties) {
+      for (const [key, propSchema] of Object.entries(schema.properties)) {
+        if (key in value) {
+          errors.push(...validateSchema(value[key], propSchema, path ? `${path}.${key}` : key));
+        }
+      }
+    }
+
+    if (schema.additionalProperties === false) {
+      const allowed = new Set(Object.keys(schema.properties ?? {}));
+      for (const key of Object.keys(value)) {
+        if (!allowed.has(key)) {
+          errors.push(`${path || "root"}: unexpected property "${key}"`);
+        }
+      }
+    }
+  } else if (schema.type === "array") {
+    if (!Array.isArray(value)) {
+      errors.push(`${path || "root"}: expected array`);
+      return errors;
+    }
+    if (schema.items) {
+      for (let i = 0; i < value.length; i++) {
+        errors.push(...validateSchema(value[i], schema.items, `${path}[${i}]`));
+      }
+    }
+  } else if (schema.type === "string") {
+    if (typeof value !== "string") {
+      errors.push(`${path || "root"}: expected string`);
+    } else {
+      if (schema.enum && !schema.enum.includes(value)) {
+        errors.push(`${path || "root"}: "${value}" is not one of [${schema.enum.join(", ")}]`);
+      }
+      if (schema.minLength !== undefined && value.length < schema.minLength) {
+        errors.push(`${path || "root"}: string too short (min ${schema.minLength})`);
+      }
+    }
+  } else if (schema.type === "integer") {
+    if (!Number.isInteger(value)) {
+      errors.push(`${path || "root"}: expected integer`);
+    } else {
+      if (schema.minimum !== undefined && value < schema.minimum) {
+        errors.push(`${path || "root"}: ${value} < minimum ${schema.minimum}`);
+      }
+    }
+  } else if (schema.type === "number") {
+    if (typeof value !== "number") {
+      errors.push(`${path || "root"}: expected number`);
+    } else {
+      if (schema.minimum !== undefined && value < schema.minimum) {
+        errors.push(`${path || "root"}: ${value} < minimum ${schema.minimum}`);
+      }
+      if (schema.maximum !== undefined && value > schema.maximum) {
+        errors.push(`${path || "root"}: ${value} > maximum ${schema.maximum}`);
+      }
+    }
   }
+
+  return errors;
 }
 
-function describeCompletedItem(state, item) {
-  switch (item.type) {
-    case "commandExecution": {
-      const exitCode = item.exitCode ?? "?";
-      const statusLabel = item.status === "completed" ? "completed" : item.status;
-      return {
-        message: `Command ${statusLabel}: ${shorten(item.command, 96)} (exit ${exitCode})`,
-        phase: looksLikeVerificationCommand(item.command) ? "verifying" : "running"
-      };
+/**
+ * Collect all token content from a chat() generator call (stream=false mode).
+ * @param {AsyncGenerator} gen
+ * @returns {Promise<{content: string, message: object, stats: object}>}
+ */
+async function collectChatResponse(gen) {
+  let content = "";
+  let message = {};
+  let stats = {};
+  for await (const delta of gen) {
+    if (delta.type === "token") {
+      content += delta.content;
+    } else if (delta.type === "done") {
+      message = delta.message ?? {};
+      stats = delta.stats ?? {};
+      // In non-stream mode the full content is in message.content
+      if (message.content) {
+        content = message.content;
+      }
     }
-    case "fileChange":
-      return { message: `File changes ${item.status}.`, phase: "editing" };
-    case "mcpToolCall":
-      return { message: `Tool ${item.server}/${item.tool} ${item.status}.`, phase: "investigating" };
-    case "dynamicToolCall":
-      return { message: `Tool ${item.tool} ${item.status}.`, phase: "investigating" };
-    case "collabAgentToolCall": {
-      const subagents = (item.receiverThreadIds ?? []).map((threadId) => labelForThread(state, threadId) ?? threadId);
-      const summary =
-        subagents.length > 0
-          ? `Subagent ${subagents.join(", ")} ${item.status}.`
-          : `Collaboration tool ${item.tool} ${item.status}.`;
-      return { message: summary, phase: "investigating" };
-    }
-    case "exitedReviewMode":
-      return { message: "Reviewer finished.", phase: "finalizing" };
-    default:
-      return null;
   }
+  return { content, message, stats };
 }
 
-/** @returns {TurnCaptureState} */
-function createTurnCaptureState(threadId, options = {}) {
-  let resolveCompletion;
-  let rejectCompletion;
-  const completion = new Promise((resolve, reject) => {
-    resolveCompletion = resolve;
-    rejectCompletion = reject;
-  });
+/**
+ * Stream a chat response and collect all content + log tokens via onProgress.
+ * @returns {Promise<string>} full response text
+ */
+async function streamChatResponse(gen, onProgress) {
+  let content = "";
+  let tokenCount = 0;
+  for await (const delta of gen) {
+    if (delta.type === "token") {
+      content += delta.content;
+      tokenCount++;
+      if (tokenCount % 20 === 0) {
+        emitProgress(onProgress, `Receiving response... (${tokenCount} tokens)`, "running");
+      }
+    } else if (delta.type === "done") {
+      if (delta.message?.content) {
+        content = delta.message.content;
+      }
+    }
+  }
+  return content;
+}
+
+/**
+ * Run an Ollama-native review (adversarial-review flow).
+ *
+ * Calls chat() with format=schema for JSON output,
+ * validates against the schema, returns a structured result.
+ *
+ * @param {object} options
+ * @param {string} options.model
+ * @param {Array<{role:string, content:string}>} options.messages
+ * @param {object} options.schema  review-output.schema.json contents
+ * @param {Function} [options.onProgress]
+ * @param {AbortSignal} [options.signal]
+ * @returns {Promise<{status: number, finalMessage: string, reasoningSummary: string[], threadId: string|null, turnId: string|null, error: unknown}>}
+ */
+export async function runReview({ model, messages, schema, onProgress, signal } = {}) {
+  emitProgress(onProgress, "Starting Ollama review.", "starting");
+
+  let rawOutput = "";
+  try {
+    const gen = chat({ model, messages, format: schema, stream: false, signal });
+    const { content } = await collectChatResponse(gen);
+    rawOutput = content;
+  } catch (error) {
+    return {
+      status: 1,
+      finalMessage: "",
+      reasoningSummary: [],
+      threadId: null,
+      turnId: null,
+      error
+    };
+  }
+
+  emitProgress(onProgress, "Review complete.", "finalizing");
 
   return {
-    threadId,
-    rootThreadId: threadId,
-    threadIds: new Set([threadId]),
-    threadTurnIds: new Map(),
-    threadLabels: new Map(),
-    turnId: null,
-    bufferedNotifications: [],
-    completion,
-    resolveCompletion,
-    rejectCompletion,
-    finalTurn: null,
-    completed: false,
-    finalAnswerSeen: false,
-    pendingCollaborations: new Set(),
-    activeSubagentTurns: new Set(),
-    completionTimer: null,
-    lastAgentMessage: "",
-    reviewText: "",
+    status: 0,
+    finalMessage: rawOutput,
     reasoningSummary: [],
+    threadId: null,
+    turnId: null,
+    error: null
+  };
+}
+
+/**
+ * Run an Ollama task (patch-emit variant — non-agentic v1).
+ *
+ * Streams the model response and returns the full text for Claude Code to apply.
+ *
+ * // TODO(phase-2.5): agentic tool-calling loop goes here
+ *
+ * @param {object} options
+ * @param {string} options.model
+ * @param {Array<{role:string, content:string}>} options.messages
+ * @param {Function} [options.onProgress]
+ * @param {AbortSignal} [options.signal]
+ * @returns {Promise<{status: number, finalMessage: string, reasoningSummary: string[], threadId: string|null, turnId: string|null, error: unknown, fileChanges: Array, touchedFiles: Array, commandExecutions: Array}>}
+ */
+export async function runTask({ model, messages, onProgress, signal } = {}) {
+  emitProgress(onProgress, "Starting Ollama task.", "starting");
+
+  let rawOutput = "";
+  try {
+    const gen = chat({ model, messages, stream: true, signal });
+    rawOutput = await streamChatResponse(gen, onProgress);
+  } catch (error) {
+    return {
+      status: 1,
+      finalMessage: "",
+      reasoningSummary: [],
+      threadId: null,
+      turnId: null,
+      error,
+      fileChanges: [],
+      touchedFiles: [],
+      commandExecutions: []
+    };
+  }
+
+  emitProgress(onProgress, "Task complete.", "finalizing");
+
+  return {
+    status: 0,
+    finalMessage: rawOutput,
+    reasoningSummary: [],
+    threadId: null,
+    turnId: null,
     error: null,
-    messages: [],
     fileChanges: [],
-    commandExecutions: [],
-    onProgress: options.onProgress ?? null
+    touchedFiles: [],
+    commandExecutions: []
   };
 }
 
-function clearCompletionTimer(state) {
-  if (state.completionTimer) {
-    clearTimeout(state.completionTimer);
-    state.completionTimer = null;
-  }
-}
+// ---------------------------------------------------------------------------
+// Compatibility shims for ollama-companion.mjs
+// ---------------------------------------------------------------------------
 
-function completeTurn(state, turn = null, options = {}) {
-  if (state.completed) {
-    return;
-  }
-
-  clearCompletionTimer(state);
-  state.completed = true;
-
-  if (turn) {
-    state.finalTurn = turn;
-    if (!state.turnId) {
-      state.turnId = turn.id;
-    }
-  } else if (!state.finalTurn) {
-    state.finalTurn = {
-      id: state.turnId ?? "inferred-turn",
-      status: "completed"
-    };
-  }
-
-  if (options.inferred) {
-    emitProgress(state.onProgress, "Turn completion inferred after the main thread finished and subagent work drained.", "finalizing");
-  }
-
-  state.resolveCompletion(state);
-}
-
-function scheduleInferredCompletion(state) {
-  if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-    return;
-  }
-
-  if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
-    return;
-  }
-
-  clearCompletionTimer(state);
-  state.completionTimer = setTimeout(() => {
-    state.completionTimer = null;
-    if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-      return;
-    }
-    if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
-      return;
-    }
-    completeTurn(state, null, { inferred: true });
-  }, 250);
-  state.completionTimer.unref?.();
-}
-
-function belongsToTurn(state, message) {
-  const messageThreadId = extractThreadId(message);
-  if (!messageThreadId || !state.threadIds.has(messageThreadId)) {
-    return false;
-  }
-  const trackedTurnId = state.threadTurnIds.get(messageThreadId) ?? null;
-  const messageTurnId = extractTurnId(message);
-  return trackedTurnId === null || messageTurnId === null || messageTurnId === trackedTurnId;
-}
-
-function recordItem(state, item, lifecycle, threadId = null) {
-  if (item.type === "collabAgentToolCall") {
-    if (!threadId || threadId === state.threadId) {
-      if (lifecycle === "started" || item.status === "inProgress") {
-        state.pendingCollaborations.add(item.id);
-      } else if (lifecycle === "completed") {
-        state.pendingCollaborations.delete(item.id);
-        scheduleInferredCompletion(state);
-      }
-    }
-    for (const receiverThreadId of item.receiverThreadIds ?? []) {
-      registerThread(state, receiverThreadId);
-    }
-  }
-
-  if (item.type === "agentMessage") {
-    state.messages.push({
-      lifecycle,
-      phase: item.phase ?? null,
-      text: item.text ?? ""
-    });
-    if (item.text) {
-      if (!threadId || threadId === state.threadId) {
-        state.lastAgentMessage = item.text;
-        if (lifecycle === "completed" && item.phase === "final_answer") {
-          state.finalAnswerSeen = true;
-          scheduleInferredCompletion(state);
-        }
-      }
-      if (lifecycle === "completed") {
-        const sourceLabel = labelForThread(state, threadId);
-        emitLogEvent(state.onProgress, {
-          message: sourceLabel ? `Subagent ${sourceLabel}: ${shorten(item.text, 96)}` : `Assistant message captured: ${shorten(item.text, 96)}`,
-          stderrMessage: null,
-          phase: item.phase === "final_answer" ? "finalizing" : null,
-          logTitle: sourceLabel ? `Subagent ${sourceLabel} message` : "Assistant message",
-          logBody: item.text
-        });
-      }
-    }
-    return;
-  }
-
-  if (item.type === "exitedReviewMode") {
-    state.reviewText = item.review ?? "";
-    if (lifecycle === "completed" && item.review) {
-      emitLogEvent(state.onProgress, {
-        message: "Review output captured.",
-        stderrMessage: null,
-        phase: "finalizing",
-        logTitle: "Review output",
-        logBody: item.review
-      });
-    }
-    return;
-  }
-
-  if (item.type === "reasoning" && lifecycle === "completed") {
-    const nextSections = extractReasoningSections(item.summary);
-    state.reasoningSummary = mergeReasoningSections(state.reasoningSummary, nextSections);
-    if (nextSections.length > 0) {
-      const sourceLabel = labelForThread(state, threadId);
-      emitLogEvent(state.onProgress, {
-        message: sourceLabel
-          ? `Subagent ${sourceLabel} reasoning: ${shorten(nextSections[0], 96)}`
-          : `Reasoning summary captured: ${shorten(nextSections[0], 96)}`,
-        stderrMessage: null,
-        logTitle: sourceLabel ? `Subagent ${sourceLabel} reasoning summary` : "Reasoning summary",
-        logBody: nextSections.map((section) => `- ${section}`).join("\n")
-      });
-    }
-    return;
-  }
-
-  if (item.type === "fileChange" && lifecycle === "completed") {
-    state.fileChanges.push(item);
-    return;
-  }
-
-  if (item.type === "commandExecution" && lifecycle === "completed") {
-    state.commandExecutions.push(item);
-  }
-}
-
-function applyTurnNotification(state, message) {
-  switch (message.method) {
-    case "thread/started":
-      registerThread(state, message.params.thread.id, {
-        threadName: message.params.thread.name,
-        name: message.params.thread.name,
-        agentNickname: message.params.thread.agentNickname,
-        agentRole: message.params.thread.agentRole
-      });
-      break;
-    case "thread/name/updated":
-      registerThread(state, message.params.threadId, {
-        threadName: message.params.threadName ?? null
-      });
-      break;
-    case "turn/started":
-      registerThread(state, message.params.threadId);
-      state.threadTurnIds.set(message.params.threadId, message.params.turn.id);
-      if ((message.params.threadId ?? null) !== state.threadId) {
-        state.activeSubagentTurns.add(message.params.threadId);
-      }
-      emitProgress(
-        state.onProgress,
-        `Turn started (${message.params.turn.id}).`,
-        "starting",
-        (message.params.threadId ?? null) === state.threadId
-          ? {
-              threadId: message.params.threadId ?? null,
-              turnId: message.params.turn.id ?? null
-            }
-          : {}
-      );
-      break;
-    case "item/started":
-      recordItem(state, message.params.item, "started", message.params.threadId ?? null);
-      {
-        const update = describeStartedItem(state, message.params.item);
-        emitProgress(state.onProgress, update?.message, update?.phase ?? null);
-      }
-      break;
-    case "item/completed":
-      recordItem(state, message.params.item, "completed", message.params.threadId ?? null);
-      {
-        const update = describeCompletedItem(state, message.params.item);
-        emitProgress(state.onProgress, update?.message, update?.phase ?? null);
-      }
-      break;
-    case "error":
-      state.error = message.params.error;
-      emitProgress(state.onProgress, `Ollama error: ${message.params.error.message}`, "failed");
-      break;
-    case "turn/completed":
-      if ((message.params.threadId ?? null) !== state.threadId) {
-        state.activeSubagentTurns.delete(message.params.threadId);
-        scheduleInferredCompletion(state);
-        break;
-      }
-      emitProgress(
-        state.onProgress,
-        `Turn ${message.params.turn.status === "completed" ? "completed" : message.params.turn.status}.`,
-        "finalizing"
-      );
-      completeTurn(state, message.params.turn);
-      break;
-    default:
-      break;
-  }
-}
-
-async function captureTurn(client, threadId, startRequest, options = {}) {
-  const state = createTurnCaptureState(threadId, options);
-  const previousHandler = client.notificationHandler;
-
-  client.setNotificationHandler((message) => {
-    if (!state.turnId) {
-      state.bufferedNotifications.push(message);
-      return;
-    }
-
-    if (message.method === "thread/started" || message.method === "thread/name/updated") {
-      applyTurnNotification(state, message);
-      return;
-    }
-
-    if (!belongsToTurn(state, message)) {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-        return;
-    }
-
-    applyTurnNotification(state, message);
-  });
-
-  try {
-    const response = await startRequest();
-    options.onResponse?.(response, state);
-    state.turnId = response.turn?.id ?? null;
-    if (state.turnId) {
-      state.threadTurnIds.set(state.threadId, state.turnId);
-    }
-    for (const message of state.bufferedNotifications) {
-      if (belongsToTurn(state, message)) {
-        applyTurnNotification(state, message);
-      } else {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-      }
-    }
-    state.bufferedNotifications.length = 0;
-
-    if (response.turn?.status && response.turn.status !== "inProgress") {
-      completeTurn(state, response.turn);
-    }
-
-    return await state.completion;
-  } finally {
-    clearCompletionTimer(state);
-    client.setNotificationHandler(previousHandler ?? null);
-  }
-}
-
-async function withAppServer(cwd, fn) {
-  let client = null;
-  try {
-    client = await OllamaAppServerClient.connect(cwd);
-    const result = await fn(client);
-    await client.close();
-    return result;
-  } catch (error) {
-    const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
-    const shouldRetryDirect =
-      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
-
-    if (client) {
-      await client.close().catch(() => {});
-      client = null;
-    }
-
-    if (!shouldRetryDirect) {
-      throw error;
-    }
-
-    const directClient = await OllamaAppServerClient.connect(cwd, { disableBroker: true });
-    try {
-      return await fn(directClient);
-    } finally {
-      await directClient.close();
-    }
-  }
-}
-
-async function startThread(client, cwd, options = {}) {
-  const response = await client.request("thread/start", buildThreadParams(cwd, options));
-  const threadId = response.thread.id;
-  if (options.threadName) {
-    try {
-      await client.request("thread/name/set", { threadId, name: options.threadName });
-    } catch (err) {
-      // Only suppress "unknown variant/method" errors from older CLI versions
-      // that don't support thread/name/set. Rethrow auth, network, or server errors.
-      const msg = String(err?.message ?? err ?? "");
-      if (!msg.includes("unknown variant") && !msg.includes("unknown method")) {
-        throw err;
-      }
-    }
-  }
-  return response;
-}
-
-async function resumeThread(client, threadId, cwd, options = {}) {
-  return client.request("thread/resume", buildResumeParams(threadId, cwd, options));
-}
-
-function buildResultStatus(turnState) {
-  return turnState.finalTurn?.status === "completed" ? 0 : 1;
-}
-
-// TODO(phase-2): this block references Codex CLI provider labels; replace when switching backends
-const BUILTIN_PROVIDER_LABELS = new Map([
-  ["openai", "OpenAI"],
-  ["ollama", "Ollama"],
-  ["lmstudio", "LM Studio"]
-]);
-
-function normalizeProviderId(value) {
-  const providerId = typeof value === "string" ? value.trim() : "";
-  return providerId || null;
-}
-
-function formatProviderLabel(providerId, providerConfig = null) {
-  const configuredName = typeof providerConfig?.name === "string" ? providerConfig.name.trim() : "";
-  if (configuredName) {
-    return configuredName;
-  }
-  if (!providerId) {
-    return "The active provider";
-  }
-  return BUILTIN_PROVIDER_LABELS.get(providerId) ?? providerId;
-}
-
-function buildAuthStatus(fields = {}) {
+/**
+ * Check if Ollama is reachable. Returns an availability object.
+ * @param {string} [_cwd] unused — kept for API compatibility
+ * @returns {{ available: boolean, detail: string }}
+ */
+export function getOllamaAvailability(_cwd) {
+  // Sync check is not possible without blocking — we return "optimistically
+  // available" here; the async health() check is used where async context allows.
+  // The companion calls this synchronously in a few guards; those paths will
+  // still work because we fail gracefully when chat() throws "not reachable".
   return {
     available: true,
-    loggedIn: false,
-    detail: "not authenticated",
-    source: "unknown",
+    detail: "Ollama HTTP API (checked at request time)"
+  };
+}
+
+/**
+ * Check Ollama auth status. Ollama has no auth — it's local and auth-free.
+ * @param {string} [_cwd]
+ * @param {object} [_options]
+ * @returns {Promise<object>}
+ */
+export async function getOllamaAuthStatus(_cwd, _options = {}) {
+  const reachable = await health();
+  return {
+    available: reachable,
+    loggedIn: reachable,
+    detail: reachable ? "Ollama is running and reachable" : `Ollama not reachable at ${getOllamaHost()}. Run \`ollama serve\` or set OLLAMA_HOST.`,
+    source: "ollama-http",
     authMethod: null,
-    verified: null,
-    requiresOpenaiAuth: null,
-    provider: null,
-    ...fields
+    verified: reachable,
+    requiresOpenaiAuth: false,
+    provider: "ollama"
   };
 }
 
-function resolveProviderConfig(configResponse) {
-  const config = configResponse?.config;
-  if (!config || typeof config !== "object") {
-    return {
-      providerId: null,
-      providerConfig: null
-    };
-  }
-
-  const providerId = normalizeProviderId(config.model_provider);
-  const providers =
-    config.model_providers && typeof config.model_providers === "object" && !Array.isArray(config.model_providers)
-      ? config.model_providers
-      : null;
-  const providerConfig =
-    providerId && providers?.[providerId] && typeof providers[providerId] === "object" ? providers[providerId] : null;
-
-  return {
-    providerId,
-    providerConfig
-  };
-}
-
-function buildAppServerAuthStatus(accountResponse, configResponse) {
-  const account = accountResponse?.account ?? null;
-  const requiresOpenaiAuth =
-    typeof accountResponse?.requiresOpenaiAuth === "boolean" ? accountResponse.requiresOpenaiAuth : null;
-  const { providerId, providerConfig } = resolveProviderConfig(configResponse);
-  const providerLabel = formatProviderLabel(providerId, providerConfig);
-
-  if (account?.type === "chatgpt") {
-    const email = typeof account.email === "string" && account.email.trim() ? account.email.trim() : null;
-    return buildAuthStatus({
-      loggedIn: true,
-      detail: email ? `ChatGPT login active for ${email}` : "ChatGPT login active",
-      source: "app-server",
-      authMethod: "chatgpt",
-      verified: true,
-      requiresOpenaiAuth,
-      provider: providerId
-    });
-  }
-
-  if (account?.type === "apiKey") {
-    return buildAuthStatus({
-      loggedIn: true,
-      detail: "API key configured (unverified)",
-      source: "app-server",
-      authMethod: "apiKey",
-      verified: false,
-      requiresOpenaiAuth,
-      provider: providerId
-    });
-  }
-
-  if (requiresOpenaiAuth === false) {
-    return buildAuthStatus({
-      loggedIn: true,
-      detail: `${providerLabel} is configured and does not require OpenAI authentication`,
-      source: "app-server",
-      requiresOpenaiAuth,
-      provider: providerId
-    });
-  }
-
-  return buildAuthStatus({
-    loggedIn: false,
-    detail: `${providerLabel} requires OpenAI authentication`,
-    source: "app-server",
-    requiresOpenaiAuth,
-    provider: providerId
-  });
-}
-
-async function getOllamaAuthStatusFromClient(client, cwd) {
-  try {
-    const accountResponse = await client.request("account/read", { refreshToken: false });
-    const configResponse = await client.request("config/read", {
-      includeLayers: false,
-      cwd
-    });
-
-    return buildAppServerAuthStatus(accountResponse, configResponse);
-  } catch (error) {
-    return buildAuthStatus({
-      loggedIn: false,
-      detail: error instanceof Error ? error.message : String(error),
-      source: "app-server"
-    });
-  }
-}
-
-// TODO(phase-2): replace Codex CLI binary check with Ollama binary check
-export function getOllamaAvailability(cwd) {
-  const versionStatus = binaryAvailable("codex", ["--version"], { cwd });
-  if (!versionStatus.available) {
-    return versionStatus;
-  }
-
-  const appServerStatus = binaryAvailable("codex", ["app-server", "--help"], { cwd });
-  if (!appServerStatus.available) {
-    return {
-      available: false,
-      detail: `${versionStatus.detail}; advanced runtime unavailable: ${appServerStatus.detail}`
-    };
-  }
-
-  return {
-    available: true,
-    detail: `${versionStatus.detail}; advanced runtime available`
-  };
-}
-
-export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) {
-  const endpoint = env?.[BROKER_ENDPOINT_ENV] ?? loadBrokerSession(cwd)?.endpoint ?? null;
-  if (endpoint) {
-    return {
-      mode: "shared",
-      label: "shared session",
-      detail: "This Claude session is configured to reuse one shared Ollama runtime.",
-      endpoint
-    };
-  }
-
+/**
+ * Returns the session runtime status (no broker in Phase 2).
+ * @returns {{ mode: string, label: string, detail: string, endpoint: null }}
+ */
+export function getSessionRuntimeStatus(_env, _cwd) {
   return {
     mode: "direct",
-    label: "direct startup",
-    detail: "No shared Ollama runtime is active yet. The first review or task command will start one on demand.",
+    label: "direct HTTP",
+    detail: "Requests go directly to the local Ollama server via HTTP.",
     endpoint: null
   };
 }
 
-// TODO(phase-2): replace Codex auth check with Ollama auth check
-export async function getOllamaAuthStatus(cwd, options = {}) {
-  const availability = getOllamaAvailability(cwd);
-  if (!availability.available) {
-    return {
-      available: false,
-      loggedIn: false,
-      detail: availability.detail,
-      source: "availability",
-      authMethod: null,
-      verified: null,
-      requiresOpenaiAuth: null,
-      provider: null
-    };
-  }
-
-  let client = null;
-  try {
-    client = await OllamaAppServerClient.connect(cwd, {
-      env: options.env,
-      reuseExistingBroker: true
-    });
-    return await getOllamaAuthStatusFromClient(client, cwd);
-  } catch (error) {
-    return buildAuthStatus({
-      loggedIn: false,
-      detail: error instanceof Error ? error.message : String(error),
-      source: "app-server"
-    });
-  } finally {
-    if (client) {
-      await client.close().catch(() => {});
-    }
-  }
+/**
+ * Interrupt a running turn. In Phase 2 there is no server-side turn to interrupt;
+ * process termination via terminateProcessTree is used instead.
+ * @returns {Promise<{attempted: boolean, interrupted: boolean, transport: null, detail: string}>}
+ */
+export async function interruptAppServerTurn(_cwd, _ids) {
+  return {
+    attempted: false,
+    interrupted: false,
+    transport: null,
+    detail: "Ollama HTTP backend has no server-side turn interrupt; process will be killed directly."
+  };
 }
 
-export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
-  if (!threadId || !turnId) {
-    return {
-      attempted: false,
-      interrupted: false,
-      transport: null,
-      detail: "missing threadId or turnId"
-    };
-  }
-
-  const availability = getOllamaAvailability(cwd);
-  if (!availability.available) {
-    return {
-      attempted: false,
-      interrupted: false,
-      transport: null,
-      detail: availability.detail
-    };
-  }
-
-  let client = null;
-  try {
-    client = await OllamaAppServerClient.connect(cwd, { reuseExistingBroker: true });
-    await client.request("turn/interrupt", { threadId, turnId });
-    return {
-      attempted: true,
-      interrupted: true,
-      transport: client.transport,
-      detail: `Interrupted ${turnId} on ${threadId}.`
-    };
-  } catch (error) {
-    return {
-      attempted: true,
-      interrupted: false,
-      transport: client?.transport ?? null,
-      detail: error instanceof Error ? error.message : String(error)
-    };
-  } finally {
-    await client?.close().catch(() => {});
-  }
+/**
+ * Find the latest task thread. In Phase 2 there is no server-side thread list.
+ * The companion falls back to local job state via findLatestResumableTaskJob.
+ * @returns {Promise<null>}
+ */
+export async function findLatestTaskThread(_cwd) {
+  return null;
 }
 
-// TODO(phase-2): replace Codex app-server review with Ollama-native review
-export async function runAppServerReview(cwd, options = {}) {
-  const availability = getOllamaAvailability(cwd);
-  if (!availability.available) {
-    throw new Error("Ollama is not installed or is not running. Install it from https://ollama.com, then rerun `/ollama:setup`.");
-  }
-
-  return withAppServer(cwd, async (client) => {
-    emitProgress(options.onProgress, "Starting Ollama review thread.", "starting");
-    const thread = await startThread(client, cwd, {
-      model: options.model,
-      sandbox: "read-only",
-      ephemeral: true,
-      threadName: options.threadName
-    });
-    const sourceThreadId = thread.thread.id;
-    emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
-      threadId: sourceThreadId
-    });
-    const delivery = options.delivery ?? "inline";
-
-    const turnState = await captureTurn(
-      client,
-      sourceThreadId,
-      () =>
-        client.request("review/start", {
-          threadId: sourceThreadId,
-          delivery,
-          target: options.target
-        }),
-      {
-        onProgress: options.onProgress,
-        onResponse(response, state) {
-          if (response.reviewThreadId) {
-            state.threadIds.add(response.reviewThreadId);
-            if (delivery === "detached") {
-              state.threadId = response.reviewThreadId;
-            }
-          }
-        }
-      }
-    );
-
-    return {
-      status: buildResultStatus(turnState),
-      threadId: turnState.threadId,
-      sourceThreadId,
-      turnId: turnState.turnId,
-      reviewText: turnState.reviewText,
-      reasoningSummary: turnState.reasoningSummary,
-      turn: turnState.finalTurn,
-      error: turnState.error,
-      stderr: cleanOllamaStderr(client.stderr)
-    };
-  });
-}
-
-// TODO(phase-2): replace Codex app-server turn with Ollama-native turn
-export async function runAppServerTurn(cwd, options = {}) {
-  const availability = getOllamaAvailability(cwd);
-  if (!availability.available) {
-    throw new Error("Ollama is not installed or is not running. Install it from https://ollama.com, then rerun `/ollama:setup`.");
-  }
-
-  return withAppServer(cwd, async (client) => {
-    let threadId;
-
-    if (options.resumeThreadId) {
-      emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: false
-      });
-      threadId = response.thread.id;
-    } else {
-      emitProgress(options.onProgress, "Starting Ollama task thread.", "starting");
-      const response = await startThread(client, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: options.persistThread ? false : true,
-        threadName: options.persistThread ? options.threadName : options.threadName ?? null
-      });
-      threadId = response.thread.id;
-    }
-
-    emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
-      threadId
-    });
-
-    const prompt = options.prompt?.trim() || options.defaultPrompt || "";
-    if (!prompt) {
-      throw new Error("A prompt is required for this Ollama run.");
-    }
-
-    const turnState = await captureTurn(
-      client,
-      threadId,
-      () =>
-        client.request("turn/start", {
-          threadId,
-          input: buildTurnInput(prompt),
-          model: options.model ?? null,
-          effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null
-        }),
-      { onProgress: options.onProgress }
-    );
-
-    return {
-      status: buildResultStatus(turnState),
-      threadId,
-      turnId: turnState.turnId,
-      finalMessage: turnState.lastAgentMessage,
-      reasoningSummary: turnState.reasoningSummary,
-      turn: turnState.finalTurn,
-      error: turnState.error,
-      stderr: cleanOllamaStderr(client.stderr),
-      fileChanges: turnState.fileChanges,
-      touchedFiles: collectTouchedFiles(turnState.fileChanges),
-      commandExecutions: turnState.commandExecutions
-    };
-  });
-}
-
-// TODO(phase-2): replace Codex app-server thread list with Ollama-native thread lookup
-export async function findLatestTaskThread(cwd) {
-  const availability = getOllamaAvailability(cwd);
-  if (!availability.available) {
-    throw new Error("Ollama is not installed or is not running. Install it from https://ollama.com, then rerun `/ollama:setup`.");
-  }
-
-  return withAppServer(cwd, async (client) => {
-    const response = await client.request("thread/list", {
-      cwd,
-      limit: 20,
-      sortKey: "updated_at",
-      sourceKinds: ["appServer"],
-      searchTerm: TASK_THREAD_PREFIX
-    });
-
-    return (
-      response.data.find((thread) => typeof thread.name === "string" && thread.name.startsWith(TASK_THREAD_PREFIX)) ??
-      null
-    );
-  });
-}
-
+/**
+ * Build a persistent task thread name from a prompt.
+ * @param {string} prompt
+ * @returns {string}
+ */
 export function buildPersistentTaskThreadName(prompt) {
-  return buildTaskThreadName(prompt);
+  const excerpt = String(prompt ?? "").trim().replace(/\s+/g, " ");
+  const shortened = excerpt.length > 56 ? `${excerpt.slice(0, 53)}...` : excerpt;
+  return shortened ? `${TASK_THREAD_PREFIX}: ${shortened}` : TASK_THREAD_PREFIX;
 }
 
+/**
+ * Parse structured JSON output from a model response.
+ * @param {string | null} rawOutput
+ * @param {object} [fallback]
+ */
 export function parseStructuredOutput(rawOutput, fallback = {}) {
   if (!rawOutput) {
     return {
@@ -1087,8 +612,14 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
   }
 }
 
+/**
+ * Read a JSON schema file.
+ * @param {string} schemaPath
+ * @returns {object}
+ */
 export function readOutputSchema(schemaPath) {
   return readJsonFile(schemaPath);
 }
 
-export { DEFAULT_CONTINUE_PROMPT, TASK_THREAD_PREFIX };
+// Re-export the validator for use in companion
+export { validateSchema };

@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { getOllamaAvailability } from "./lib/ollama.mjs";
+import { health as ollamaHealth } from "./lib/ollama.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { getConfig, listJobs } from "./lib/state.mjs";
 import { sortJobsNewestFirst } from "./lib/job-control.mjs";
@@ -56,14 +56,13 @@ function buildStopReviewPrompt(input = {}) {
   });
 }
 
-function buildSetupNote(cwd) {
-  const availability = getOllamaAvailability(cwd);
-  if (availability.available) {
+async function buildSetupNote(_cwd) {
+  const reachable = await ollamaHealth().catch(() => false);
+  if (reachable) {
     return null;
   }
-
-  const detail = availability.detail ? ` ${availability.detail}.` : "";
-  return `Ollama is not set up for the review gate.${detail} Run /ollama:setup.`;
+  const host = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  return `Ollama is not reachable at ${host}. Run \`ollama serve\` and rerun /ollama:setup.`;
 }
 
 function parseStopReviewOutput(rawOutput) {
@@ -139,7 +138,7 @@ function runStopReview(cwd, input = {}) {
   }
 }
 
-function main() {
+async function main() {
   const input = readHookInput();
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);
@@ -156,7 +155,7 @@ function main() {
     return;
   }
 
-  const setupNote = buildSetupNote(cwd);
+  const setupNote = await buildSetupNote(cwd);
   if (setupNote) {
     logNote(setupNote);
     logNote(runningTaskNote);
@@ -175,10 +174,8 @@ function main() {
   logNote(runningTaskNote);
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`${message}\n`);
   process.exitCode = 1;
-}
+});

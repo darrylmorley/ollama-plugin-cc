@@ -17,8 +17,9 @@ import {
     interruptAppServerTurn,
     parseStructuredOutput,
     readOutputSchema,
-    runAppServerReview,
-    runAppServerTurn
+    runReview,
+    runTask,
+    validateSchema
   } from "./lib/ollama.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
@@ -52,7 +53,6 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
-  renderNativeReviewResult,
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
@@ -360,60 +360,47 @@ async function executeReviewRun(request) {
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
-  if (reviewName === "Review") {
-    const reviewTarget = validateNativeReviewRequest(target, focusText);
-    const result = await runAppServerReview(request.cwd, {
-      target: reviewTarget,
-      model: request.model,
-      onProgress: request.onProgress
-    });
-    const payload = {
-      review: reviewName,
-      target,
-      threadId: result.threadId,
-      sourceThreadId: result.sourceThreadId,
-      ollama: {
-        status: result.status,
-        stderr: result.stderr,
-        stdout: result.reviewText,
-        reasoning: result.reasoningSummary
-      }
-    };
-    const rendered = renderNativeReviewResult(
-      {
-        status: result.status,
-        stdout: result.reviewText,
-        stderr: result.stderr
-      },
-      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
-    );
+  const schema = readOutputSchema(REVIEW_SCHEMA);
 
-    return {
-      exitStatus: result.status,
-      threadId: result.threadId,
-      turnId: result.turnId,
-      payload,
-      rendered,
-      summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
-      jobTitle: `Ollama ${reviewName}`,
-      jobClass: "review",
-      targetLabel: target.label
-    };
-  }
-
+  // Both "Review" and "Adversarial Review" use the same Ollama HTTP flow.
+  // The difference is only the prompt (adversarial uses a harsher system prompt).
   const context = collectReviewContext(request.cwd, target);
-  const prompt = buildAdversarialReviewPrompt(context, focusText);
-  const result = await runAppServerTurn(context.repoRoot, {
-    prompt,
+  const userPrompt = buildAdversarialReviewPrompt(context, focusText);
+
+  // Embed schema in system prompt to guide JSON output.
+  const systemPrompt = [
+    `You are performing a ${reviewName} of the provided code changes.`,
+    "Respond ONLY with a valid JSON object matching this schema exactly:",
+    JSON.stringify(schema, null, 2),
+    "Do not include any text outside the JSON object."
+  ].join("\n\n");
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt }
+  ];
+
+  const result = await runReview({
     model: request.model,
-    sandbox: "read-only",
-    outputSchema: readOutputSchema(REVIEW_SCHEMA),
+    messages,
+    schema,
     onProgress: request.onProgress
   });
+
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
-    failureMessage: result.error?.message ?? result.stderr
+    failureMessage: result.error?.message ?? ""
   });
+
+  // Validate parsed output against schema; emit clear error if it fails
+  if (parsed.parsed) {
+    const validationErrors = validateSchema(parsed.parsed, schema);
+    if (validationErrors.length > 0) {
+      parsed.parseError = `Schema validation failed:\n${validationErrors.join("\n")}`;
+      parsed.parsed = null;
+    }
+  }
+
   const payload = {
     review: reviewName,
     target,
@@ -425,7 +412,7 @@ async function executeReviewRun(request) {
     },
     ollama: {
       status: result.status,
-      stderr: result.stderr,
+      stderr: "",
       stdout: result.finalMessage,
       reasoning: result.reasoningSummary
     },
@@ -462,35 +449,45 @@ async function executeTaskRun(request) {
     resumeLast: request.resumeLast
   });
 
-  let resumeThreadId = null;
+  // TODO(phase-2.5): agentic tool-calling loop — Phase 2 v1 uses patch-emit variant.
+  // --resume-last: no server-side thread state; fall back to local job history only.
+  let effectivePrompt = request.prompt;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
     });
-    if (!latestThread) {
+    // latestThread is from local job state (findLatestTaskThread always returns null in Phase 2)
+    if (!latestThread && !request.prompt) {
       throw new Error("No previous Ollama task thread was found for this repository.");
     }
-    resumeThreadId = latestThread.id;
+    if (!effectivePrompt) {
+      effectivePrompt = DEFAULT_CONTINUE_PROMPT;
+    }
   }
 
-  if (!request.prompt && !resumeThreadId) {
+  if (!effectivePrompt) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const result = await runAppServerTurn(workspaceRoot, {
-    resumeThreadId,
-    prompt: request.prompt,
-    defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
+  // Phase 2 non-agentic patch-emit variant:
+  // Ask the model to produce a unified diff that Claude Code can apply.
+  const systemPrompt = request.write
+    ? "You are a coding assistant. Produce a unified diff (patch) that implements the requested changes. Output ONLY the diff — no explanations before or after."
+    : "You are a coding assistant. Analyse the request and describe the changes needed, or produce a unified diff if edits are requested.";
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: effectivePrompt }
+  ];
+
+  const result = await runTask({
     model: request.model,
-    effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
-    onProgress: request.onProgress,
-    persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+    messages,
+    onProgress: request.onProgress
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
-  const failureMessage = result.error?.message ?? result.stderr ?? "";
+  const failureMessage = result.error?.message ?? "";
   const rendered = renderTaskResult(
     {
       rawOutput,
@@ -507,7 +504,7 @@ async function executeTaskRun(request) {
     status: result.status,
     threadId: result.threadId,
     rawOutput,
-    touchedFiles: result.touchedFiles,
+    touchedFiles: result.touchedFiles ?? [],
     reasoningSummary: result.reasoningSummary
   };
 
@@ -722,8 +719,9 @@ async function handleReviewCommand(argv, config) {
 
 async function handleReview(argv) {
   return handleReviewCommand(argv, {
-    reviewName: "Review",
-    validateRequest: validateNativeReviewRequest
+    reviewName: "Review"
+    // No validateRequest — both review and adversarial-review now use the Ollama HTTP flow.
+    // validateNativeReviewRequest restrictions (no focusText, limited target modes) no longer apply.
   });
 }
 
