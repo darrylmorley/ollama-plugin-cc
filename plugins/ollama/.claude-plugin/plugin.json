@@ -1,6 +1,6 @@
 {
   "name": "ollama",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Use Ollama from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "darrylmorley"

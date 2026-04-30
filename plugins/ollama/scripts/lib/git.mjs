@@ -221,22 +221,81 @@ function formatUntrackedFile(cwd, relativePath) {
   return [`### ${relativePath}`, "```", buffer.toString("utf8").trimEnd(), "```"].join("\n");
 }
 
+/**
+ * Format a changed (tracked) file with line numbers, for inline review context.
+ * Uses the same guards as formatUntrackedFile (binary skip, size cap, symlink).
+ * Returns null if the file should be omitted entirely (deleted/missing); a
+ * string otherwise.
+ *
+ * @param {string} cwd            repository root
+ * @param {string} relativePath   path relative to cwd
+ * @returns {string | null}
+ */
+function formatChangedFileWithLineNumbers(cwd, relativePath) {
+  const absolutePath = path.join(cwd, relativePath);
+  let stat;
+  try {
+    stat = fs.statSync(absolutePath);
+  } catch {
+    // Deleted in working tree — diff already shows the removal; omit content.
+    return null;
+  }
+  if (stat.isDirectory()) {
+    return null;
+  }
+  if (stat.size > MAX_UNTRACKED_BYTES) {
+    return `### ${relativePath}\n(skipped: ${stat.size} bytes exceeds ${MAX_UNTRACKED_BYTES} byte limit)`;
+  }
+  let buffer;
+  try {
+    buffer = fs.readFileSync(absolutePath);
+  } catch {
+    return null;
+  }
+  if (!isProbablyText(buffer)) {
+    return `### ${relativePath}\n(skipped: binary file)`;
+  }
+  const lines = buffer.toString("utf8").split("\n");
+  const width = String(lines.length).length;
+  const numbered = lines
+    .map((line, idx) => `${String(idx + 1).padStart(width, " ")}│ ${line}`)
+    .join("\n")
+    .replace(/\n+$/, "");
+  return [`### ${relativePath}`, "```", numbered, "```"].join("\n");
+}
+
+function buildChangedFilesSection(cwd, files) {
+  if (!files || files.length === 0) return "";
+  const blocks = [];
+  for (const file of files) {
+    const formatted = formatChangedFileWithLineNumbers(cwd, file);
+    if (formatted) blocks.push(formatted);
+  }
+  return blocks.join("\n\n");
+}
+
 function collectWorkingTreeContext(cwd, state, options = {}) {
   const includeDiff = options.includeDiff !== false;
   const status = gitChecked(cwd, ["status", "--short", "--untracked-files=all"]).stdout.trim();
   const changedFiles = listUniqueFiles(state.staged, state.unstaged, state.untracked);
 
   let parts;
+  let changedFileContents = "";
   if (includeDiff) {
     const stagedDiff = gitChecked(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
     const unstagedDiff = gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
     const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
+    const trackedChanged = listUniqueFiles(state.staged, state.unstaged);
+    changedFileContents = buildChangedFilesSection(cwd, trackedChanged);
     parts = [
       formatSection("Git Status", status),
       formatSection("Staged Diff", stagedDiff),
       formatSection("Unstaged Diff", unstagedDiff),
       formatSection("Untracked Files", untrackedBody)
     ];
+    if (changedFileContents) {
+      parts.push(formatSection("Changed File Contents (current state, with line numbers)", changedFileContents));
+    }
   } else {
     const stagedStat = gitChecked(cwd, ["diff", "--shortstat", "--cached"]).stdout.trim();
     const unstagedStat = gitChecked(cwd, ["diff", "--shortstat"]).stdout.trim();
@@ -254,7 +313,8 @@ function collectWorkingTreeContext(cwd, state, options = {}) {
     mode: "working-tree",
     summary: `Reviewing ${state.staged.length} staged, ${state.unstaged.length} unstaged, and ${state.untracked.length} untracked file(s).`,
     content: parts.join("\n"),
-    changedFiles
+    changedFiles,
+    changedFileContents
   };
 }
 
@@ -266,25 +326,32 @@ function collectBranchContext(cwd, baseRef, options = {}) {
   const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", comparison.commitRange]).stdout.trim();
 
+  const changedFileContents = includeDiff ? buildChangedFilesSection(cwd, changedFiles) : "";
+  const baseParts = includeDiff
+    ? [
+        formatSection("Commit Log", logOutput),
+        formatSection("Diff Stat", diffStat),
+        formatSection(
+          "Branch Diff",
+          gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange]).stdout
+        )
+      ]
+    : [
+        formatSection("Commit Log", logOutput),
+        formatSection("Diff Stat", diffStat),
+        formatSection("Changed Files", changedFiles.join("\n"))
+      ];
+  if (changedFileContents) {
+    baseParts.push(formatSection("Changed File Contents (current state, with line numbers)", changedFileContents));
+  }
+
   return {
     mode: "branch",
     summary: `Reviewing branch ${currentBranch} against ${baseRef} from merge-base ${comparison.mergeBase}.`,
-    content: includeDiff
-      ? [
-          formatSection("Commit Log", logOutput),
-          formatSection("Diff Stat", diffStat),
-          formatSection(
-            "Branch Diff",
-            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange]).stdout
-          )
-        ].join("\n")
-      : [
-          formatSection("Commit Log", logOutput),
-          formatSection("Diff Stat", diffStat),
-          formatSection("Changed Files", changedFiles.join("\n"))
-        ].join("\n"),
+    content: baseParts.join("\n"),
     changedFiles,
-    comparison
+    comparison,
+    changedFileContents
   };
 }
 
@@ -294,6 +361,45 @@ function buildAdversarialCollectionGuidance(options = {}) {
   }
 
   return "The repository context below is a lightweight summary. Inspect the target diff yourself with read-only git commands before finalizing findings.";
+}
+
+/**
+ * Apply a token budget to a review context. If the total estimated token
+ * count exceeds `budgetTokens`, drop the "Changed File Contents" section
+ * (the largest, lowest-priority block) and re-build content. The diff
+ * itself is never trimmed here — that would silently degrade review
+ * quality. Returns the (possibly modified) context with `budget` metadata.
+ *
+ * @param {object} context           result of collectReviewContext
+ * @param {{ tokens: number, source?: string }} budget
+ * @param {(text: string) => number} estimateTokens
+ */
+export function applyContextBudget(context, budget, estimateTokens) {
+  if (!context || !budget || typeof budget.tokens !== "number") return context;
+  const estimated = estimateTokens(context.content);
+  let trimmed = false;
+  let newContent = context.content;
+  if (estimated > budget.tokens && context.changedFileContents) {
+    // Strip the Changed File Contents section. It's the only block we add
+    // that's a pure context aid; the diff itself is the user's request.
+    const marker = "## Changed File Contents (current state, with line numbers)";
+    const idx = newContent.indexOf(marker);
+    if (idx >= 0) {
+      newContent = newContent.slice(0, idx).replace(/\n+$/, "") + "\n";
+      trimmed = true;
+    }
+  }
+  return {
+    ...context,
+    content: newContent,
+    budget: {
+      tokens: budget.tokens,
+      source: budget.source ?? "unknown",
+      estimatedTokens: estimateTokens(newContent),
+      trimmedFileContents: trimmed,
+      overBudget: estimateTokens(newContent) > budget.tokens
+    }
+  };
 }
 
 export function collectReviewContext(cwd, target, options = {}) {
