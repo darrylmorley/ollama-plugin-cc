@@ -209,7 +209,7 @@ function toolApplyPatch({ patch }, { cwd }) {
  * @param {{ command: string, args?: string[] }} args
  * @param {{ cwd: string, allowCommands?: string, signal?: AbortSignal }} ctx
  */
-function toolRunCommand({ command, args: cmdArgs = [] }, { cwd, allowCommands, signal }) {
+function toolRunCommand({ command, args: cmdArgs = [] }, { cwd, allowCommands, signal: _signal }) {
   if (!command || typeof command !== "string") {
     return { error: "command must be a non-empty string." };
   }
