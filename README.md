@@ -40,7 +40,7 @@ choose a cloud-hosted model.
 |---|---|
 | `/ollama:review` | Read-only review of current uncommitted changes or a branch diff |
 | `/ollama:adversarial-review` | Steerable review that challenges design decisions and tradeoffs |
-| `/ollama:rescue` | Delegates a task to Ollama; emits a diff for Claude to apply |
+| `/ollama:rescue` | Delegates a task to Ollama; runs an agentic tool-calling loop by default (`--emit-patch` for one-shot diff) |
 | `/ollama:status` | Shows running and recent Ollama jobs for the current repo |
 | `/ollama:result` | Shows the stored output for a finished job |
 | `/ollama:cancel` | Cancels an active background job |
@@ -59,7 +59,7 @@ See the `ollama-model-prompting` skill for full guidance. Short version:
 | Adversarial review | `deepseek-coder-v2:16b` |
 | Stop-review gate only | `qwen2.5:7b` |
 
-Tool-calling (used by the future agentic rescue mode) is reliable on Llama 3.1+,
+Tool-calling (required for agentic rescue) is reliable on Llama 3.1+,
 Qwen 2.5+/3+, DeepSeek-Coder-V2+, GPT-OSS, Gemma 3+, GLM 4+, Kimi K2+, and
 Granite 3. Smaller models (3B, 1B) and thinking-token models (DeepSeek-R1
 distills) are unreliable for structured output.
@@ -88,6 +88,7 @@ Override the model on any command with `--model <name>`.
 |---|---|
 | `OLLAMA_HOST` | Ollama server URL (default: `http://127.0.0.1:11434`) |
 | `OLLAMA_PLUGIN_DEFAULT_MODEL` | Fallback model when `--model` is not passed and no per-workspace config is set |
+| `OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS` | Comma-separated list of extra commands for agentic rescue's `run_command` tool; use `*` to allow all |
 
 Per-workspace config (set via `/ollama:setup --default-model`) is stored in the plugin state
 directory and takes precedence over `OLLAMA_PLUGIN_DEFAULT_MODEL`.
@@ -96,8 +97,11 @@ directory and takes precedence over `OLLAMA_PLUGIN_DEFAULT_MODEL`.
 
 - **Review and adversarial-review** work on any model that produces valid JSON. Structured
   output uses Ollama's schema-constrained decoding (Ollama >= 0.5) for reliability.
-- **Rescue** currently runs in patch-emit mode: the model outputs a unified diff that Claude
-  Code applies. Agentic tool-calling (read/write/bash loop) is planned for a future release.
+- **Rescue** runs an agentic tool-calling loop by default: the model can read files, list
+  directories, apply patches, and run allowlisted commands autonomously (hard cap: 20 iterations).
+  Use `--emit-patch` to force the legacy one-shot diff output instead. Models that do not support
+  tool calling fall back to patch-emit automatically. Override the command allowlist with
+  `OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS=cmd1,cmd2` (or `=*` for unrestricted).
 - **Stop-review gate** uses a `Stop` hook — enable with `/ollama:setup --enable-review-gate`.
   It can create long Claude/Ollama loops; only enable when actively monitoring the session.
 - **Background jobs** work for all long-running operations. Use `--background` and check

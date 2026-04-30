@@ -25,7 +25,7 @@ Select via `--model <name>` on any companion command. Falls back to `OLLAMA_PLUG
 
 ## Tool-Calling Support Matrix
 
-Tool calling is required for the agentic `rescue` flow (`--agentic` flag). Non-agentic rescue (patch-emit mode) works without it.
+Tool calling is required for the agentic `rescue` flow (default). Use `--emit-patch` to force patch-emit mode, which works without tool calling.
 
 | Model family | Tool calling | Notes |
 |---|---|---|

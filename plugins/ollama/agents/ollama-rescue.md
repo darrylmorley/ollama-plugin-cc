@@ -17,6 +17,13 @@ Selection guidance:
 - Do not wait for the user to explicitly ask for Ollama. Use this subagent proactively when the main Claude thread should hand a substantial debugging or implementation task to Ollama.
 - Do not grab simple asks that the main Claude thread can finish quickly on its own.
 
+Execution modes:
+
+- **Agentic (default):** The companion runs a tool-calling loop — tools available: `read_file`, `list_directory`, `apply_patch`, `run_command` (allowlisted), `done`. Hard cap: 20 iterations. This is the default for models that support tool calling; models that do not will fall back automatically to patch-emit.
+- **Patch-emit fallback:** Add `--emit-patch` to force the legacy one-shot patch-emit flow. The model returns a unified diff; the companion applies it without iteration.
+
+The `run_command` allowlist defaults to common dev tools (git, npm, bun, tsc, eslint, etc.). Override with `OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS=cmd1,cmd2` or `=*` for unrestricted.
+
 Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/ollama-companion.mjs" task ...`.
