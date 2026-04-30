@@ -182,15 +182,31 @@ function firstMeaningfulLine(text, fallback) {
 // Models that reliably support tool-calling for the agentic rescue flow.
 // Based on the matrix in plugins/ollama/skills/ollama-model-prompting/SKILL.md.
 const TOOL_CALLING_FAMILIES = [
-  /^llama3\.1/,
+  /^llama3\.[1-9]/,
+  /^llama[4-9]/,
   /^qwen2\.5/,
-  /^deepseek-coder-v2/,
+  /^qwen3/,
+  /^qwen[4-9]/,
+  /\bqwen3-coder/,
+  /\bqwen2\.5-coder/,
+  /^deepseek-coder-v[2-9]/,
+  /^deepseek-r1/,
+  /^deepseek-v[2-9]/,
   /^mistral-large/,
-  /^mistral-nemo/
+  /^mistral-nemo/,
+  /^mistral-small/,
+  /^gpt-oss/,
+  /^gemma[3-9]/,
+  /^glm-[4-9]/,
+  /^kimi-k[2-9]/,
+  /\bcommand-r/,
+  /^granite3/
 ];
 
 function modelSupportsToolCalling(name) {
-  const lower = String(name ?? "").toLowerCase();
+  // Strip optional `namespace/` prefix so models like `batiai/qwen3.6-27b:q6`
+  // match the `^qwen3` family patterns.
+  const lower = String(name ?? "").toLowerCase().replace(/^[^/]+\//, "");
   for (const pattern of TOOL_CALLING_FAMILIES) {
     if (pattern.test(lower)) {
       return true;

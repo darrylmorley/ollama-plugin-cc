@@ -29,16 +29,22 @@ Tool calling is required for the agentic `rescue` flow (`--agentic` flag). Non-a
 
 | Model family | Tool calling | Notes |
 |---|---|---|
-| Llama 3.1 8B/70B/405B | Reliable | Native tool-call support since 3.1 |
+| Llama 3.1+ / Llama 4+ | Reliable | Native tool-call support since 3.1 |
 | Llama 3.2 3B/1B | Unreliable | Too small; output format degrades |
-| Qwen 2.5 7B/14B/32B/72B | Reliable | Solid tool-call format across sizes |
-| Qwen 2.5 Coder 7B/14B/32B | Reliable | Same base; code context does not hurt tool calls |
-| DeepSeek-Coder-V2 16B/236B | Reliable | Strong reasoning; good tool adherence |
+| Qwen 2.5 / Qwen 3+ | Reliable | Solid tool-call format across sizes |
+| Qwen 2.5/3 Coder | Reliable | Same base; code context does not hurt tool calls |
+| DeepSeek-Coder-V2+ / DeepSeek-V2+ | Reliable | Strong reasoning; good tool adherence |
 | DeepSeek-R1 (distills) | Unreliable | Thinking tokens interfere with JSON/tool output |
 | Mistral 7B | Unreliable | v0.2 and earlier lack native tool-call format |
-| Mistral Large / Nemo | Reliable | Larger Mistral variants support tool calls |
+| Mistral Large / Nemo / Small | Reliable | Larger Mistral variants support tool calls |
+| GPT-OSS (20B/120B) | Reliable | OpenAI open-weight; native tool-call format |
+| Gemma 3+ | Reliable | Tool-call support added from Gemma 3 onward |
+| Gemma 2 9B/27B | Partial | Tool-call-like output but not standard format |
+| GLM 4+ | Reliable | Strong instruction-following and tool format |
+| Kimi K2+ | Reliable | Cloud-hosted via Ollama; reliable tool calls |
+| Command-R / Command-R+ | Reliable | Cohere; designed for tool use and RAG |
+| Granite 3 | Reliable | IBM; native tool-call schema |
 | Phi-3 / Phi-4 | Unreliable | Small; JSON adherence inconsistent |
-| Gemma 2 9B/27B | Partial | Produces tool-call-like output but not standard format |
 
 When in doubt: test with the stop-review gate first (simple ALLOW/BLOCK output). If that fails, the model is not ready for structured JSON tasks.
 
