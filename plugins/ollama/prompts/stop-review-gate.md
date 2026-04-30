@@ -1,3 +1,16 @@
+<output_format>
+Your entire response must be a SINGLE LINE in this exact format:
+
+ALLOW: <one-line reason>
+
+or
+
+BLOCK: <one-line reason>
+
+No preamble. No explanation. No markdown. No additional lines.
+The very first character of your response must be A (for ALLOW) or B (for BLOCK).
+</output_format>
+
 <task>
 Run a stop-gate review of the previous Claude turn.
 Only review the work from the previous Claude turn.
@@ -11,26 +24,20 @@ Challenge whether that specific work and its design choices should ship.
 {{CLAUDE_RESPONSE_BLOCK}}
 </task>
 
-<compact_output_contract>
-Return a compact final answer.
-Your first line must be exactly one of:
-- ALLOW: <short reason>
-- BLOCK: <short reason>
-Do not put anything before that first line.
-</compact_output_contract>
-
-<default_follow_through_policy>
+<decision_rules>
 Use ALLOW if the previous turn did not make code changes or if you do not see a blocking issue.
 Use ALLOW immediately, without extra investigation, if the previous turn was not an edit-producing turn.
 Use BLOCK only if the previous turn made code changes and you found something that still needs to be fixed before stopping.
-</default_follow_through_policy>
+Do not block based on older edits from earlier turns when the immediately previous turn did not itself make direct edits.
+</decision_rules>
 
 <grounding_rules>
 Ground every blocking claim in the repository context or tool outputs you inspected during this run.
-Do not treat the previous Claude response as proof that code changes happened; verify that from the repository state before you block.
-Do not block based on older edits from earlier turns when the immediately previous turn did not itself make direct edits.
+Do not treat the previous Claude response as proof that code changes happened; verify from repository state before you block.
+If the previous turn did make code changes, check for second-order failures, empty-state behavior, retries, stale state, and rollback risk before you finalize.
 </grounding_rules>
 
-<dig_deeper_nudge>
-If the previous turn did make code changes, check for second-order failures, empty-state behavior, retries, stale state, rollback risk, and design tradeoffs before you finalize.
-</dig_deeper_nudge>
+<reminder>
+Your entire response is ONE LINE: either "ALLOW: <reason>" or "BLOCK: <reason>".
+Nothing before it. Nothing after it.
+</reminder>

@@ -18,4 +18,5 @@ When the helper returns Ollama output:
 - For `ollama:ollama-rescue`, if Ollama was never successfully invoked, do not generate a substitute answer at all.
 - CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
 - If the helper reports malformed output or a failed Ollama run, include the most actionable stderr lines and stop there instead of guessing.
+- If Ollama returns malformed JSON despite JSON-mode being enabled, surface the raw response verbatim with a clear error label ("Ollama returned malformed JSON:") rather than trying to extract or infer fields from it. Prompt the user to retry with a stronger model or to run `/ollama:review --wait` manually.
 - If the helper reports that setup or authentication is required, direct the user to `/ollama:setup` and do not improvise alternate auth flows.

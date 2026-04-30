@@ -8,20 +8,42 @@ user-invocable: false
 
 Use this skill only inside the `ollama:ollama-rescue` subagent.
 
+## Invoking the Companion Script
+
 Primary helper:
 - `node "${CLAUDE_PLUGIN_ROOT}/scripts/ollama-companion.mjs" task "<raw arguments>"`
 
-Execution rules:
+The companion script talks directly to Ollama's HTTP API. There is no broker process and no app-server to start or stop — Ollama itself must be running at `OLLAMA_HOST` before the companion is invoked.
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `OLLAMA_HOST` | Base URL for the Ollama HTTP API | `http://127.0.0.1:11434` |
+| `OLLAMA_PLUGIN_DEFAULT_MODEL` | Default model when `--model` is not supplied | none (required to be set or passed explicitly) |
+| `OLLAMA_PLUGIN_JOB_DIR` | Override for background job storage directory | `.ollama/companion-jobs/` inside workspace root |
+| `OLLAMA_PLUGIN_LOG_LEVEL` | Verbosity: `silent`, `error`, `info`, `debug` | `info` |
+
+## Selecting a Model
+
+Pass `--model <name>` to override the default:
+- `node "${CLAUDE_PLUGIN_ROOT}/scripts/ollama-companion.mjs" task --model qwen2.5-coder:14b "<task>"`
+
+If `--model` is omitted and `OLLAMA_PLUGIN_DEFAULT_MODEL` is not set, the companion exits with a non-zero status and a message directing the user to `/ollama:setup`.
+
+See the `ollama-model-prompting` skill for model selection guidance.
+
+## Execution Rules
+
 - The rescue subagent is a forwarder, not an orchestrator. Its only job is to invoke `task` once and return that stdout unchanged.
-- Prefer the helper over hand-rolled `git`, direct Ollama CLI strings, or any other Bash activity.
+- Prefer the helper over hand-rolled `git`, direct Ollama API calls, or any other Bash activity.
 - Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel` from `ollama:ollama-rescue`.
 - Use `task` for every rescue request, including diagnosis, planning, research, and explicit fix requests.
-<!-- TODO(phase-4): replace gpt-5-4-prompting skill reference with an Ollama-compatible prompt-shaping skill -->
-- Leave `--effort` unset unless the user explicitly requests a specific effort.
 - Leave model unset by default. Add `--model` only when the user explicitly asks for one.
 - Default to a write-capable Ollama run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 
-Command selection:
+## Command Selection
+
 - Use exactly one `task` invocation per rescue handoff.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, pass it through to `task`.
@@ -33,7 +55,8 @@ Command selection:
 - `--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`.
 - `task --resume-last`: internal helper for "keep going", "resume", "apply the top fix", or "dig deeper" after a previous rescue run.
 
-Safety rules:
+## Safety Rules
+
 - Default to write-capable Ollama work in `ollama:ollama-rescue` unless the user explicitly asks for read-only behavior.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.

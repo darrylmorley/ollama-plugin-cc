@@ -136,7 +136,7 @@ test("rescue command absorbs continue semantics", () => {
   // TODO(phase-4): gpt-5-4-prompting skill deleted; update agent skill list test once replacement skill exists
   assert.match(runtimeSkill, /only job is to invoke `task` once and return that stdout unchanged/i);
   assert.match(runtimeSkill, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
-  assert.match(runtimeSkill, /Leave `--effort` unset unless the user explicitly requests a specific effort/i);
+  assert.match(runtimeSkill, /If the forwarded request includes `--effort`, pass it through to `task`/i);
   assert.match(runtimeSkill, /Leave model unset by default/i);
   assert.match(runtimeSkill, /If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only/i);
   assert.match(runtimeSkill, /Strip it before calling `task`/i);

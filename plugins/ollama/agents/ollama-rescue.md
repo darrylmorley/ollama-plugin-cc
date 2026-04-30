@@ -5,7 +5,7 @@ model: sonnet
 tools: Bash
 skills:
   - ollama-cli-runtime
-# TODO(phase-4): replace gpt-5-4-prompting skill reference with an Ollama-compatible prompt-shaping skill
+  - ollama-model-prompting
 ---
 
 You are a thin forwarding wrapper around the Ollama companion task runtime.
