@@ -10,30 +10,56 @@ to:
 
 > Run `node scripts/battle-test.mjs` against your own fixture to reproduce.
 
-## Battle-test results (v0.8.0, 2026-04-30)
+## Battle-test results (v0.10.0, 2026-05-01)
 
-| Model | Review | Adv. review | Rescue | Notes |
+8 distinct models tested against the SQL-injection fixture. **All 8 passed
+rescue.** Review and adversarial-review pass rates vary by model.
+
+### Local models
+
+| Model | Review | Adv. review | Rescue | Findings count (R / A) |
 |---|---|---|---|---|
-| `qwen3.5:9b` | ✓ 2 findings / 270s | ✓ 3 findings / 74s | ✓ | VRAM-friendly baseline; slow but reliable |
-| `gemma4:26b` | ✓ 2 findings / 68s | ✗ schema drift | ✓ | Most resourceful for rescue; adversarial path is flaky |
-| `gpt-oss:20b` | ✓ 1 finding / 26s | ✓ 2 findings / 20s | ✓ | Best balance of size, speed, and quality |
-| `qwen3.6:27b-coding-nvfp4` | ✗ runner fault | ✗ runner fault | ✓ | Long prompts crashed the Ollama mlx runner; rescue worked |
-| `glm-5.1:cloud` | ✓ 2 findings / 12s | ✓ 2 findings / 11s | ✓ | Fastest, cleanest structured output |
+| `qwen3.5:9b` (9.7B Q4) | ✓ 79s | ✓ 74s | ✓ 3 iter / 44s | 3 / 3 |
+| `gemma4:26b` (Q4) | ✓ 69s | ✓ 110s | ✓ 5 iter / 29s | 1 / 2 |
+| `gpt-oss:20b` (MXFP4) | ✓ 26s | ✓ 24s | ✓ 4 iter / 20s | 1 / 2 |
+| `qwen3.6:27b-coding-nvfp4` | ✗ schema drift | ✗ verdict missing | ✓ 4 iter / 120s | – / – |
+| `batiai/qwen3.6-27b:q6` (Q6_K) | ✗ verdict missing | ✗ verdict missing | ✓ 1 iter / 300s | – / – |
 
-All five models successfully fixed the SQL injection in the rescue task. The
-"agentic vs patch-emit" mode count was unreliable in this run due to a stdout/
-stderr split in the driver — Phase 1.5 testing already established that the
-strong code models use `write_file` once `apply_patch` rejects, while smaller
-models hit the auto-fallback to patch-emit.
+### Cloud models
+
+| Model | Review | Adv. review | Rescue | Findings (R / A) |
+|---|---|---|---|---|
+| `qwen3-coder-next:cloud` (80B FP8) | ✓ 6s | ✓ 6s | ✓ 3 iter / 9s | 1 / 1 |
+| `glm-5.1:cloud` | ✓ 63s | ✓ 47s | ✓ 6 iter / 29s | 2 / 2 |
+| `kimi-k2.6:cloud` (1T int4) | ✗ verdict missing | ✓ 113s | ✓ 3 iter / 13s | – / 3 |
+
+### Headlines
+
+- **Fastest tested (anywhere)**: `qwen3-coder-next:cloud` — review and rescue
+  in single-digit seconds.
+- **Best local all-rounder**: `gpt-oss:20b` — fastest local on every command,
+  reliable structured output.
+- **Best for rescue**: every tested model passed; `gpt-oss:20b` and
+  `glm-5.1:cloud` are the fastest.
+- **Worst structured-output reliability**: both qwen3.6 27B local variants
+  (`-coding-nvfp4`, `batiai/...:q6`) drift off the JSON schema on the review
+  prompts. They still rescue cleanly via tool calls.
+- **kimi-k2.6:cloud caveat**: review missed verdict; adversarial worked.
+  The harsher prompt seems to anchor it; the gentler review prompt drifts.
+
+All 8 models successfully fixed the rescue task. Iteration counts are now
+captured correctly (the v0.8.0 driver had a stdout/stderr split bug).
 
 ## Recommendations by use case
 
 | Use case | First choice | Why |
 |---|---|---|
-| **Local rescue** | `gemma4:26b` | Most resourceful when `apply_patch` fails — falls back to `write_file` cleanly. |
-| **Local review** | `qwen3.6:27b-coding-nvfp4` or `gpt-oss:20b` | Strong code understanding, reliable JSON output. |
-| **Cloud rescue & review** | `glm-5.1:cloud` | Fast, strong tool calling, reliable JSON. |
-| **Small / VRAM-constrained** | `qwen3.5:9b` | 6.6 GB; works but slower on review (~5 min). |
+| **Cloud, anything** | `qwen3-coder-next:cloud` | Fastest tested across review/adv/rescue (6–9 s each). |
+| **Cloud rescue, alt** | `glm-5.1:cloud` | Reliable structured output; 6 iter / 29s rescue. |
+| **Local all-rounder** | `gpt-oss:20b` | Fastest local on every command; reliable JSON. |
+| **Local rescue** | `gemma4:26b` | Most resourceful when `apply_patch` rejects; reliable JSON. |
+| **VRAM-constrained** | `qwen3.5:9b` | 6.6 GB; works on every command (~80 s review). |
+| **Adversarial-only cloud** | `kimi-k2.6:cloud` | Strong adversarial; review schema drift makes it less suitable for `/ollama:review`. |
 
 ## Known gotchas
 
@@ -62,17 +88,21 @@ The agentic rescue auto-falls back to patch-emit for these families
 If you want to use one of these, pass `--emit-patch` to opt into the legacy
 patch-emit flow explicitly.
 
-### Ollama mlx runner can crash on long prompts (Apple Silicon)
+### Qwen 3.6 27B variants drift on structured review
 
-During battle testing, `qwen3.6:27b-coding-nvfp4` consistently returned
-`Ollama /api/chat error 500: mlx runner failed` on the review and
-adversarial-review tasks (~1700-token prompts). Rescue worked fine. The
-fault is in the Ollama Metal accelerator pipeline, not the plugin. If you
-hit this:
+Both `qwen3.6:27b-coding-nvfp4` (nvfp4) and `batiai/qwen3.6-27b:q6` (Q6_K
+gguf) failed structured review and adversarial-review against this fixture
+— the JSON came back without a usable verdict. The earlier mlx-runner
+crash on the nvfp4 variant intermittently surfaces too. Both succeeded at
+rescue (tool calls bracket the format). Use them only for rescue, or
+prefer `gpt-oss:20b`/`gemma4:26b` for local review.
 
-- Try a quantization in `gguf` format instead of `nvfp4` for review work.
-- Or use the model only for rescue (which streams shorter messages via
-  tool calls).
+### kimi-k2.6:cloud — review only flaky, adversarial fine
+
+`kimi-k2.6:cloud` failed structured review (verdict missing) but produced
+3 findings on adversarial-review. The harsher adversarial prompt seems to
+anchor the schema better than the gentler review prompt. Use `--scope` /
+`/ollama:adversarial-review` for cloud-Kimi-style workloads.
 
 ### Reasoning-heavy models
 
