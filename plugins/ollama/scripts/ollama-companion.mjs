@@ -26,7 +26,8 @@ import {
     validateSchema
   } from "./lib/ollama.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { applyContextBudget, collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { estimateTokens, resolveBudget } from "./lib/token-budget.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -506,7 +507,15 @@ async function executeReviewRun(request) {
 
   // Both "Review" and "Adversarial Review" use the same Ollama HTTP flow.
   // The difference is only the prompt (adversarial uses a harsher system prompt).
-  const context = collectReviewContext(request.cwd, target);
+  let context = collectReviewContext(request.cwd, target);
+  const budget = await resolveBudget(undefined, request.model);
+  context = applyContextBudget(context, budget, estimateTokens);
+  if (context.budget?.trimmedFileContents) {
+    request.onProgress?.({
+      phase: "context-trimmed",
+      message: `Context exceeded ${budget.tokens}-token budget (source=${budget.source}); dropped inline file contents.`
+    });
+  }
   const userPrompt = buildAdversarialReviewPrompt(context, focusText);
 
   // Embed schema in system prompt to guide JSON output.

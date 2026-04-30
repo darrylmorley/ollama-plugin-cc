@@ -181,3 +181,94 @@ test("collectReviewContext keeps untracked file content in lightweight working t
   assert.match(context.content, /## Untracked Files/);
   assert.match(context.content, /UNTRACKED_RISK_MARKER/);
 });
+
+// ──────────────────────────────────────────────────────────────────
+// Phase 2 — inline file context with line numbers + budget
+// ──────────────────────────────────────────────────────────────────
+
+import { applyContextBudget } from "../plugins/ollama/scripts/lib/git.mjs";
+import { estimateTokens } from "../plugins/ollama/scripts/lib/token-budget.mjs";
+
+test("collectReviewContext inlines changed file contents with line numbers (working tree)", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v2');\nconsole.log('extra');\n");
+
+  const target = resolveReviewTarget(cwd, {});
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(context.inputMode, "inline-diff");
+  assert.match(context.content, /## Changed File Contents \(current state, with line numbers\)/);
+  assert.match(context.content, /1│ console\.log\('v2'\)/);
+  assert.match(context.content, /2│ console\.log\('extra'\)/);
+});
+
+test("collectReviewContext inlines changed file contents in branch mode", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "alpha\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  run("git", ["checkout", "-b", "feature/test"], { cwd });
+  fs.writeFileSync(path.join(cwd, "app.js"), "beta\ngamma\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "change"], { cwd });
+
+  const target = resolveReviewTarget(cwd, {});
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "branch");
+  assert.match(context.content, /## Changed File Contents \(current state, with line numbers\)/);
+  assert.match(context.content, /1│ beta/);
+  assert.match(context.content, /2│ gamma/);
+});
+
+test("collectReviewContext skips file content for binary files", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "blob.bin"), Buffer.from([0, 1, 2, 0, 0, 255, 254]));
+  run("git", ["add", "blob.bin"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.writeFileSync(path.join(cwd, "blob.bin"), Buffer.from([0, 1, 2, 0, 0, 100, 200]));
+
+  const target = resolveReviewTarget(cwd, {});
+  const context = collectReviewContext(cwd, target);
+
+  assert.match(context.content, /skipped: binary file/);
+});
+
+test("applyContextBudget drops Changed File Contents when over budget", () => {
+  const fakeContext = {
+    content: [
+      "## Git Status",
+      "M app.js",
+      "",
+      "## Staged Diff",
+      "diff --git a/app.js b/app.js",
+      "",
+      "## Changed File Contents (current state, with line numbers)",
+      "### app.js",
+      "```",
+      "1│ " + "x".repeat(10000),
+      "```"
+    ].join("\n"),
+    changedFileContents: "### app.js\n```\n1│ " + "x".repeat(10000) + "\n```"
+  };
+  const result = applyContextBudget(fakeContext, { tokens: 1000, source: "static" }, estimateTokens);
+  assert.equal(result.budget.trimmedFileContents, true);
+  assert.doesNotMatch(result.content, /Changed File Contents/);
+  assert.match(result.content, /## Staged Diff/);
+});
+
+test("applyContextBudget no-ops when within budget", () => {
+  const ctx = {
+    content: "## Git Status\nshort\n\n## Changed File Contents (current state, with line numbers)\n### a.js\n```\n1│ ok\n```",
+    changedFileContents: "### a.js\n```\n1│ ok\n```"
+  };
+  const result = applyContextBudget(ctx, { tokens: 100_000, source: "show" }, estimateTokens);
+  assert.equal(result.budget.trimmedFileContents, false);
+  assert.match(result.content, /Changed File Contents/);
+});

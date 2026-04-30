@@ -237,6 +237,26 @@ export async function pullModel(name, onProgress = null) {
 }
 
 /**
+ * POST /api/show — return model metadata (model_info, details, capabilities).
+ * Returns null on any error so callers can fall back gracefully.
+ * @param {string} _host  (unused; kept for API symmetry — we use the global OLLAMA_HOST)
+ * @param {string} model
+ */
+export async function ollamaShow(_host, model) {
+  try {
+    const response = await ollamaFetch("/api/show", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model })
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Health check — returns true if Ollama is reachable, false otherwise.
  * @returns {Promise<boolean>}
  */
