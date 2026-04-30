@@ -8,6 +8,13 @@
  *
  * Terminates when the parent process exits (detected via stdin EOF or
  * SIGTERM/SIGINT).
+ *
+ * Supported behaviors:
+ *   review-ok, review-malformed-json, adversarial-clean,
+ *   slow-task, interruptible-slow-task
+ *   agentic-happy-path       — iteration 1: read_file, iteration 2: apply_patch, iteration 3: done
+ *   agentic-max-iterations   — keeps returning read_file tool calls forever
+ *   agentic-malformed-tool-call — returns a malformed tool_calls array (unparseable args)
  */
 
 import fs from "node:fs";
@@ -71,6 +78,46 @@ const TASK_STOP_GATE_BLOCK = "BLOCK: Missing empty-state guard in src/app.js:4-6
 const TASK_STOP_GATE_ALLOW = "ALLOW: No blocking issues found in the previous turn.";
 
 // ---------------------------------------------------------------------------
+// Agentic behavior — per-request iteration counter (module-level, each child
+// process starts at 0 so each test gets a clean slate).
+// ---------------------------------------------------------------------------
+
+let agenticIteration = 0;
+
+/**
+ * Build a non-streaming (stream=false) JSON response body with tool_calls.
+ * Matches the Ollama API shape exactly:
+ *   { model, message: { role, content, tool_calls: [{function:{name,arguments}}] }, done }
+ */
+function buildToolCallResponse(toolName, toolArgs) {
+  return {
+    model: "fake-model",
+    message: {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ function: { name: toolName, arguments: toolArgs } }]
+    },
+    done: true,
+    total_duration: 100000000,
+    eval_count: 10
+  };
+}
+
+/**
+ * Build a non-streaming (stream=false) JSON response body with NO tool_calls
+ * (plain text completion).
+ */
+function buildPlainResponse(content) {
+  return {
+    model: "fake-model",
+    message: { role: "assistant", content },
+    done: true,
+    total_duration: 100000000,
+    eval_count: 10
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Request classifiers
 // ---------------------------------------------------------------------------
 
@@ -110,6 +157,53 @@ function isResumeTask(body) {
 // ---------------------------------------------------------------------------
 
 function buildChatResponse(body) {
+  // ── Agentic behaviors (tool-calling, stream=false) ──────────────────────
+  if (behavior === "agentic-happy-path") {
+    agenticIteration += 1;
+    if (agenticIteration === 1) {
+      // First call: ask to read a file
+      return { type: "agentic-json", body: buildToolCallResponse("read_file", { path: "app.js" }) };
+    }
+    if (agenticIteration === 2) {
+      // Second call: apply a trivial patch
+      return {
+        type: "agentic-json",
+        body: buildToolCallResponse("apply_patch", {
+          patch: "--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n"
+        })
+      };
+    }
+    // Third+ call: signal done
+    return {
+      type: "agentic-json",
+      body: buildToolCallResponse("done", { summary: "Fixed the issue in app.js." })
+    };
+  }
+
+  if (behavior === "agentic-max-iterations") {
+    // Always return a read_file tool call — never terminates on its own
+    return { type: "agentic-json", body: buildToolCallResponse("read_file", { path: "app.js" }) };
+  }
+
+  if (behavior === "agentic-malformed-tool-call") {
+    // Return a tool_calls array with a non-parseable arguments string
+    return {
+      type: "agentic-json",
+      body: {
+        model: "fake-model",
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ function: { name: "read_file", arguments: "{NOT VALID JSON{{{{" } }]
+        },
+        done: true,
+        total_duration: 100000000,
+        eval_count: 5
+      }
+    };
+  }
+
+  // ── Review (stream=false, JSON schema mode) ──────────────────────────────
   if (isReviewRequest(body)) {
     if (behavior === "review-malformed-json") {
       return { type: "json", content: "This is not JSON at all { broken" };
@@ -230,6 +324,11 @@ const server = http.createServer((req, res) => {
 
       if (responseSpec.type === "json") {
         writeJsonResponse(res, responseSpec.content);
+      } else if (responseSpec.type === "agentic-json") {
+        // Non-streaming tool-calling response — send full JSON body directly
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.write(JSON.stringify(responseSpec.body));
+        res.end();
       } else if (responseSpec.type === "stream") {
         writeStreamingResponse(res, responseSpec.content);
       } else if (responseSpec.type === "slow-stream") {
@@ -257,14 +356,13 @@ server.listen(0, "127.0.0.1", () => {
   process.stdout.write(`READY:${host}\n`);
 });
 
-// Terminate when parent closes stdin (pipe closed) or sends SIGTERM
-process.stdin.resume();
-process.stdin.on("end", () => {
+// Terminate on SIGTERM or SIGINT.
+process.on("SIGTERM", () => {
   server.close();
   process.exit(0);
 });
 
-process.on("SIGTERM", () => {
+process.on("SIGINT", () => {
   server.close();
   process.exit(0);
 });

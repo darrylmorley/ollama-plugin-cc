@@ -20,6 +20,7 @@ import {
     parseStructuredOutput,
     pullModel,
     readOutputSchema,
+    runAgenticTask,
     runReview,
     runTask,
     validateSchema
@@ -203,15 +204,55 @@ const TOOL_CALLING_FAMILIES = [
   /^granite3/
 ];
 
+/**
+ * Models known to NOT support tool-calling reliably. These will always
+ * trigger the patch-emit auto-fallback. Checked BEFORE the allow-list so
+ * a model listed here is never accidentally upgraded.
+ */
+const TOOL_CALLING_DENY_FAMILIES = [
+  /^phi-?3/,   // phi-3:mini, phi3, phi-3.5 — no tool-calling support
+  /^phi-?2/,
+  /^gemma[12][^0-9]/,  // gemma1/gemma2 series (not gemma3+)
+  /^llama3\.0/,
+  /^llama[123][^.]/,   // llama1, llama2, llama3 (without minor version)
+  /^orca[-_]/,
+  /^tinyllama/,
+  // codellama: base and code-completion variants don't support tool calling.
+  // Instruct variants are borderline, but we deny conservatively to avoid
+  // silent failures; refinement (e.g. allow codellama.*instruct) is future work.
+  /^codellama/,
+];
+
+/**
+ * Check whether a model name belongs to a tool-calling-capable family.
+ *
+ * Returns:
+ *   true   — model is in the known-good allow-list (agentic mode safe)
+ *   false  — model is in the known-bad deny-list (auto-fallback to patch-emit)
+ *   null   — unknown model (caller decides; companion uses agentic with a warning)
+ *
+ * @param {string} name
+ * @returns {true | false | null}
+ */
 function modelSupportsToolCalling(name) {
   // Strip optional `namespace/` prefix so models like `batiai/qwen3.6-27b:q6`
   // match the `^qwen3` family patterns.
   const lower = String(name ?? "").toLowerCase().replace(/^[^/]+\//, "");
+
+  // Check deny-list first — a model here is definitely not tool-calling capable.
+  for (const pattern of TOOL_CALLING_DENY_FAMILIES) {
+    if (pattern.test(lower)) {
+      return false;
+    }
+  }
+
+  // Check allow-list — a model here is reliably tool-calling capable.
   for (const pattern of TOOL_CALLING_FAMILIES) {
     if (pattern.test(lower)) {
       return true;
     }
   }
+
   return null; // unknown
 }
 
@@ -587,14 +628,13 @@ async function executeTaskRun(request) {
     resumeLast: request.resumeLast
   });
 
-  // TODO(phase-2.5): agentic tool-calling loop — Phase 2 v1 uses patch-emit variant.
   // --resume-last: no server-side thread state; fall back to local job history only.
   let effectivePrompt = request.prompt;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
     });
-    // latestThread is from local job state (findLatestTaskThread always returns null in Phase 2)
+    // latestThread is from local job state (findLatestTaskThread always returns null)
     if (!latestThread && !request.prompt) {
       throw new Error("No previous Ollama task thread was found for this repository.");
     }
@@ -607,22 +647,85 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  // Phase 2 non-agentic patch-emit variant:
-  // Ask the model to produce a unified diff that Claude Code can apply.
-  const systemPrompt = request.write
-    ? "You are a coding assistant. Produce a unified diff (patch) that implements the requested changes. Output ONLY the diff — no explanations before or after."
-    : "You are a coding assistant. Analyse the request and describe the changes needed, or produce a unified diff if edits are requested.";
+  // ── Routing: agentic vs patch-emit ──────────────────────────────────────
+  //
+  // Default: agentic (runAgenticTask) — the model gets full tool-calling.
+  //
+  // Fallback to patch-emit (runTask) when:
+  //   (a) --emit-patch flag is passed explicitly, OR
+  //   (b) modelSupportsToolCalling() returns false (known non-tool-calling model)
+  //
+  // NOTE: modelSupportsToolCalling() returns null for unknown models. We treat
+  // null as "unknown — proceed with agentic and warn if it fails". Only an
+  // explicit false (no known model returns false today) triggers auto-fallback.
 
-  const messages = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: effectivePrompt }
-  ];
+  const useEmitPatch = Boolean(request.emitPatch);
+  const toolSupport = modelSupportsToolCalling(request.model ?? "");
+  // toolSupport is true, null, or false. Only false → mandatory fallback.
+  const forcePatchEmit = useEmitPatch || toolSupport === false;
 
-  const result = await runTask({
-    model: request.model,
-    messages,
-    onProgress: request.onProgress
-  });
+  if (toolSupport === false && !useEmitPatch) {
+    process.stderr.write(
+      `[ollama] Warning: Model "${request.model}" may not support tool-calling reliably; falling back to patch-emit. Pass --emit-patch to silence this, or --agentic to override.\n`
+    );
+  }
+
+  let result;
+
+  if (forcePatchEmit) {
+    // ── Patch-emit fallback (non-agentic) ──
+    const systemPrompt = request.write
+      ? "You are a coding assistant. Produce a unified diff (patch) that implements the requested changes. Output ONLY the diff — no explanations before or after."
+      : "You are a coding assistant. Analyse the request and describe the changes needed, or produce a unified diff if edits are requested.";
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: effectivePrompt }
+    ];
+
+    result = await runTask({
+      model: request.model,
+      messages,
+      onProgress: request.onProgress
+    });
+  } else {
+    // ── Agentic mode (default) ──
+    const systemPrompt = [
+      "You are an expert coding assistant with access to tools that let you read files, list directories, apply patches, and run commands.",
+      "Use read_file to inspect the relevant code before making changes.",
+      "Use apply_patch to make changes using unified diff format.",
+      "Use run_command to run tests or verify your changes.",
+      "When you are satisfied the task is complete, call done with a concise summary.",
+      "Always call done when finished — do not return a plain-text answer without using tools first."
+    ].join("\n");
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: effectivePrompt }
+    ];
+
+    // Read allowCommands from env or request
+    const allowCommands = request.allowCommands ?? process.env.OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS;
+
+    result = await runAgenticTask({
+      model: request.model,
+      messages,
+      onProgress: request.onProgress,
+      signal: request.signal,
+      maxIterations: request.maxIterations,
+      cwd: request.cwd,
+      allowCommands
+    });
+
+    // Persist per-tool-call log entries if we have a logFile.
+    // appendLogLine is already imported from tracked-jobs.mjs at the top of this file.
+    if (request.logFile && Array.isArray(result.toolCalls)) {
+      for (const tc of result.toolCalls) {
+        const line = `tool=${tc.tool} args=${safeJsonLog(tc.args)} result=${truncateLog(safeJsonLog(tc.result), 500)}`;
+        appendLogLine(request.logFile, line);
+      }
+    }
+  }
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? "";
@@ -643,6 +746,9 @@ async function executeTaskRun(request) {
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles ?? [],
+    commandExecutions: result.commandExecutions ?? [],
+    toolCalls: result.toolCalls ?? [],
+    iterations: result.iterations ?? null,
     reasoningSummary: result.reasoningSummary
   };
 
@@ -657,6 +763,22 @@ async function executeTaskRun(request) {
     jobClass: "task",
     write: Boolean(request.write)
   };
+}
+
+/** @private — JSON.stringify with fallback for log lines */
+function safeJsonLog(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** @private — truncate a string to maxLen chars */
+function truncateLog(s, maxLen) {
+  if (typeof s !== "string") return s;
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen) + "…";
 }
 
 function buildReviewJobMetadata(reviewName, target) {
@@ -731,7 +853,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId, emitPatch }) {
   return {
     cwd,
     model,
@@ -739,7 +861,8 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
     prompt,
     write,
     resumeLast,
-    jobId
+    jobId,
+    emitPatch
   };
 }
 
@@ -866,7 +989,7 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "emit-patch", "agentic"],
     aliasMap: {
       m: "model"
     }
@@ -889,6 +1012,11 @@ async function handleTask(argv) {
     resumeLast
   });
 
+  // --emit-patch forces patch-emit; --agentic overrides a known-false model check
+  // (--agentic just prevents auto-fallback; it doesn't explicitly set a flag since
+  //  agentic is already the default).
+  const emitPatch = Boolean(options["emit-patch"]);
+
   if (options.background) {
     ensureOllamaAvailable(cwd);
     requireTaskRequest(prompt, resumeLast);
@@ -901,7 +1029,8 @@ async function handleTask(argv) {
       prompt,
       write,
       resumeLast,
-      jobId: job.id
+      jobId: job.id,
+      emitPatch
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
@@ -920,6 +1049,7 @@ async function handleTask(argv) {
         write,
         resumeLast,
         jobId: job.id,
+        emitPatch,
         onProgress: progress
       }),
     { json: options.json }

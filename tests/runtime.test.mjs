@@ -210,7 +210,9 @@ test("task runs and streams the result to stdout", () => {
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const result = run("node", [SCRIPT, "task", "describe the codebase"], {
+  // --emit-patch routes to the patch-emit (non-agentic) flow so the fake
+  // streaming server produces a determinate response.
+  const result = run("node", [SCRIPT, "task", "--emit-patch", "describe the codebase"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
@@ -228,7 +230,9 @@ test("task --write output focuses on the Ollama result", () => {
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const result = run("node", [SCRIPT, "task", "--write", "fix the failing test"], {
+  // --emit-patch routes to the patch-emit (non-agentic) flow so the fake
+  // streaming server produces a determinate response.
+  const result = run("node", [SCRIPT, "task", "--emit-patch", "--write", "fix the failing test"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
@@ -246,13 +250,15 @@ test("task --resume-last resumes the latest persisted task thread", () => {
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const firstRun = run("node", [SCRIPT, "task", "initial task"], {
+  // --emit-patch routes to the patch-emit (non-agentic) flow so the fake
+  // streaming server produces a determinate response on both runs.
+  const firstRun = run("node", [SCRIPT, "task", "--emit-patch", "initial task"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
   assert.equal(firstRun.status, 0, firstRun.stderr);
 
-  const result = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
+  const result = run("node", [SCRIPT, "task", "--emit-patch", "--resume-last", "follow up"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
@@ -364,7 +370,9 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the failing test"], {
+  // --emit-patch routes to the patch-emit (non-agentic) flow so the fake
+  // streaming server produces a determinate response in the background worker.
+  const launched = run("node", [SCRIPT, "task", "--background", "--emit-patch", "--json", "investigate the failing test"], {
     cwd: repo,
     env: buildEnv(binDir)
   });

@@ -22,6 +22,7 @@
  *   TASK_THREAD_PREFIX
  */
 import { readJsonFile } from "./fs.mjs";
+import { buildToolSchemas, dispatchToolCall } from "./agentic-tools.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -491,6 +492,242 @@ export async function runTask({ model, messages, onProgress, signal } = {}) {
     touchedFiles: [],
     commandExecutions: []
   };
+}
+
+// ---------------------------------------------------------------------------
+// Agentic task loop
+// ---------------------------------------------------------------------------
+
+/**
+ * Run an agentic rescue task via the tool-calling loop.
+ *
+ * The model receives the registered tools (read_file, list_directory,
+ * apply_patch, run_command, done) and iterates until it either:
+ *   1. Calls the `done` tool  → success, summary is the final message
+ *   2. Returns a response with no tool_calls → success, content is final message
+ *   3. Exceeds maxIterations   → failure, "max iterations reached"
+ *
+ * NOTE: This function mutates the `messages` array passed in. Callers that
+ * need to reuse it should pass a copy.
+ *
+ * @param {{
+ *   model: string,
+ *   messages: Array<{role: string, content: string}>,
+ *   onProgress?: Function,
+ *   signal?: AbortSignal,
+ *   maxIterations?: number,
+ *   cwd?: string,
+ *   allowCommands?: string
+ * }} options
+ * @returns {Promise<{
+ *   status: number,
+ *   finalMessage: string,
+ *   reasoningSummary: string[],
+ *   threadId: null,
+ *   turnId: null,
+ *   error: unknown,
+ *   fileChanges: Array,
+ *   touchedFiles: string[],
+ *   commandExecutions: Array,
+ *   toolCalls: Array,
+ *   iterations: number
+ * }>}
+ */
+export async function runAgenticTask({
+  model,
+  messages,
+  onProgress,
+  signal,
+  maxIterations = 20,
+  cwd = process.cwd(),
+  allowCommands
+} = {}) {
+  const tools = buildToolSchemas();
+  const toolCallLog = [];       // full record of every tool call for the job log
+  const touchedFiles = [];      // files touched by apply_patch
+  const commandExecutions = []; // commands run by run_command
+  let iterationCount = 0;
+
+  emitProgress(onProgress, "Starting agentic rescue.", "starting");
+
+  // Clamp maxIterations to a sane range
+  const cap = Math.max(1, Math.min(Number(maxIterations) || 20, 100));
+
+  try {
+    while (iterationCount < cap) {
+      iterationCount += 1;
+      emitProgress(
+        onProgress,
+        `Iteration ${iterationCount} of ${cap}.`,
+        "running",
+        { message: `Iteration ${iterationCount} of ${cap}.`, phase: "running" }
+      );
+
+      // Always use stream=false for tool calling — Ollama's streaming
+      // tool_call deltas are unreliable; non-stream gives us the full message.
+      const gen = chat({ model, messages, tools, stream: false, signal });
+      const { message } = await collectChatResponse(gen);
+
+      const rawToolCalls = message.tool_calls;
+
+      // ── No tool calls → model is done, return content as final message ──
+      if (!rawToolCalls || rawToolCalls.length === 0) {
+        const finalContent = typeof message.content === "string" ? message.content : "";
+        emitProgress(onProgress, "Agent completed (no tool calls).", "finalizing");
+        return buildAgenticResult({
+          status: 0,
+          finalMessage: finalContent,
+          toolCalls: toolCallLog,
+          iterations: iterationCount,
+          touchedFiles,
+          commandExecutions
+        });
+      }
+
+      // ── Append assistant message (with tool_calls intact) to history ──
+      messages.push({ role: "assistant", content: message.content ?? "", tool_calls: rawToolCalls });
+
+      // ── Execute each tool call in sequence ──
+      for (const tc of rawToolCalls) {
+        const name = tc.function?.name ?? "";
+
+        // Normalize arguments — some Ollama builds send JSON-encoded string
+        let args;
+        try {
+          args = typeof tc.function?.arguments === "string"
+            ? JSON.parse(tc.function.arguments || "{}")
+            : (tc.function?.arguments ?? {});
+        } catch {
+          args = {};
+        }
+
+        const startMs = Date.now();
+        emitProgress(onProgress, `Calling tool: ${name}(${summarizeArgs(args)})`, "running");
+
+        const result = dispatchToolCall({ name, args, cwd, allowCommands, signal });
+        const elapsedMs = Date.now() - startMs;
+
+        // Record in the tool call log
+        const record = {
+          iteration: iterationCount,
+          tool: name,
+          args,
+          result,
+          elapsedMs
+        };
+        toolCallLog.push(record);
+
+        // Track side-effects for the result payload
+        if (name === "apply_patch" && result?.applied === true) {
+          if (Array.isArray(result.files)) {
+            touchedFiles.push(...result.files);
+          }
+          emitProgress(onProgress, `Applied patch (${result.files?.length ?? 0} file(s) changed).`, "running");
+        }
+        if (name === "run_command") {
+          commandExecutions.push({ command: args.command, args: args.args ?? [], result });
+        }
+
+        // Emit a structured log entry for the job log
+        emitProgress(onProgress, `Tool ${name} completed in ${elapsedMs}ms.`, "running", {
+          message: `Tool ${name} completed in ${elapsedMs}ms.`,
+          phase: "running",
+          logTitle: `tool=${name} args=${safeJson(args)}`,
+          logBody: `result=${truncateJson(result, 500)}`
+        });
+
+        // ── done tool → exit with summary ──
+        if (name === "done" && result?.done === true) {
+          emitProgress(onProgress, "Agent called done.", "finalizing");
+          messages.push({ role: "tool", content: JSON.stringify(result), tool_name: name });
+          return buildAgenticResult({
+            status: 0,
+            finalMessage: result.summary ?? "",
+            toolCalls: toolCallLog,
+            iterations: iterationCount,
+            touchedFiles,
+            commandExecutions
+          });
+        }
+
+        // Append tool result to conversation history
+        messages.push({
+          role: "tool",
+          content: JSON.stringify(result),
+          tool_name: name
+        });
+      }
+    }
+
+    // ── Exceeded iteration cap ──
+    emitProgress(onProgress, `Max iterations (${cap}) reached.`, "finalizing");
+    return buildAgenticResult({
+      status: 1,
+      finalMessage: `Agentic rescue stopped: max iterations (${cap}) reached without completing.`,
+      error: new Error(`Max iterations (${cap}) reached`),
+      toolCalls: toolCallLog,
+      iterations: iterationCount,
+      touchedFiles,
+      commandExecutions
+    });
+  } catch (error) {
+    return buildAgenticResult({
+      status: 1,
+      finalMessage: "",
+      error,
+      toolCalls: toolCallLog,
+      iterations: iterationCount,
+      touchedFiles,
+      commandExecutions
+    });
+  }
+}
+
+/** @private */
+function buildAgenticResult({ status, finalMessage, error = null, toolCalls, iterations, touchedFiles, commandExecutions }) {
+  return {
+    status,
+    finalMessage,
+    reasoningSummary: [],
+    threadId: null,
+    turnId: null,
+    error,
+    fileChanges: touchedFiles.map((f) => ({ path: f })),
+    touchedFiles,
+    commandExecutions,
+    toolCalls,
+    iterations
+  };
+}
+
+/** @private — produce a short human-readable summary of tool arguments */
+function summarizeArgs(args) {
+  if (!args || typeof args !== "object") return "";
+  const entries = Object.entries(args);
+  if (entries.length === 0) return "";
+  return entries
+    .slice(0, 2)
+    .map(([k, v]) => {
+      const s = typeof v === "string" ? v.slice(0, 40) : JSON.stringify(v).slice(0, 40);
+      return `${k}=${s}`;
+    })
+    .join(", ");
+}
+
+/** @private — JSON.stringify with fallback */
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** @private — truncate a JSON representation to `maxLen` chars */
+function truncateJson(value, maxLen) {
+  const s = safeJson(value);
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen) + "…";
 }
 
 // ---------------------------------------------------------------------------
