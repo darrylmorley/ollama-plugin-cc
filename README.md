@@ -1,5 +1,7 @@
 # ollama-plugin-cc
 
+[![CI](https://github.com/darrylmorley/ollama-plugin-cc/actions/workflows/ci.yml/badge.svg)](https://github.com/darrylmorley/ollama-plugin-cc/actions/workflows/ci.yml)
+
 Use a local Ollama model from Claude Code to review code or delegate tasks.
 
 This plugin lets you run code reviews and background rescue tasks against an

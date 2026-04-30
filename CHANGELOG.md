@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-04-30
+
+### Added
+
+- **CI** — GitHub Actions workflow runs the test suite on Node 18.18, 20, and 22 for every pull request and push to main. Status badge in README.
+- **Actionable Ollama-unreachable errors** — connection-refused, DNS-failure, and timeout cases now surface one-line messages with the fix (`Run \`ollama serve\``, `Check OLLAMA_HOST`).
+- **Model-not-pulled detection** — 404 from `/api/chat` with a "model not found" body now returns `Run \`ollama pull <model>\` first` instead of the raw API error.
+
+### Removed
+
+- Dead code: `validateNativeReviewRequest`, `buildNativeReviewTarget`, and the unused `buildPersistentTaskThreadName` import from companion.
+
 ## [0.6.0] - 2026-04-30
 
 ### Added

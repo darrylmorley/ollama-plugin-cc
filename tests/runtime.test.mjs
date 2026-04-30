@@ -981,3 +981,39 @@ test("listModels() returns available models from /api/tags", async () => {
     close();
   }
 });
+
+// ──────────────────────────────────────────────────────────────────
+// Phase 3.3 — actionable Ollama-unreachable errors
+// ──────────────────────────────────────────────────────────────────
+
+test("Ollama unreachable: ECONNREFUSED maps to 'connection refused' actionable message", async () => {
+  const prevHost = process.env.OLLAMA_HOST;
+  process.env.OLLAMA_HOST = "http://127.0.0.1:1"; // port 1 is reserved, no listener
+  try {
+    const { listModels } = await import("../plugins/ollama/scripts/lib/ollama.mjs");
+    await assert.rejects(
+      () => listModels(),
+      (err) =>
+        /Ollama not reachable/i.test(err.message) &&
+        /(connection refused|ollama serve)/i.test(err.message)
+    );
+  } finally {
+    if (prevHost === undefined) delete process.env.OLLAMA_HOST;
+    else process.env.OLLAMA_HOST = prevHost;
+  }
+});
+
+test("Ollama unreachable: ENOTFOUND on bad DNS maps to 'check OLLAMA_HOST' message", async () => {
+  const prevHost = process.env.OLLAMA_HOST;
+  process.env.OLLAMA_HOST = "http://this-host-definitely-does-not-exist.invalid:11434";
+  try {
+    const { listModels } = await import("../plugins/ollama/scripts/lib/ollama.mjs");
+    await assert.rejects(
+      () => listModels(),
+      (err) => /OLLAMA_HOST|DNS|not reachable/i.test(err.message)
+    );
+  } finally {
+    if (prevHost === undefined) delete process.env.OLLAMA_HOST;
+    else process.env.OLLAMA_HOST = prevHost;
+  }
+});

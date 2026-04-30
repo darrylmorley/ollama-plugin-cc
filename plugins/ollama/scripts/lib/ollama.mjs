@@ -40,10 +40,37 @@ function getOllamaHost() {
   return (process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(/\/$/, "");
 }
 
-function buildNotReachableError(host) {
-  return new Error(
-    `Ollama not reachable at ${host}. Run \`ollama serve\` or set OLLAMA_HOST.`
-  );
+/**
+ * Build an actionable error message from a fetch failure.
+ * Distinguishes connection-refused, DNS-resolution, and timeout cases.
+ *
+ * @param {string} host
+ * @param {unknown} error
+ */
+function buildFetchError(host, error) {
+  const code = error?.cause?.code ?? error?.code;
+  if (code === "ECONNREFUSED") {
+    return new Error(
+      `Ollama not reachable at ${host} (connection refused). Run \`ollama serve\` (or \`brew services start ollama\` on macOS), then retry.`
+    );
+  }
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+    return new Error(
+      `Ollama not reachable at ${host} (DNS lookup failed). Check your OLLAMA_HOST value — currently "${host}".`
+    );
+  }
+  if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
+    return new Error(
+      `Ollama at ${host} timed out. The server may be overloaded or unreachable on this network.`
+    );
+  }
+  if (error instanceof TypeError) {
+    // Generic fetch failure — most often connection-refused on local Ollama.
+    return new Error(
+      `Ollama not reachable at ${host}. Run \`ollama serve\` or set OLLAMA_HOST to a reachable instance.`
+    );
+  }
+  return error;
 }
 
 /**
@@ -59,11 +86,7 @@ async function ollamaFetch(path, init = {}) {
     const response = await fetch(url, init);
     return response;
   } catch (error) {
-    // Network-level failures (ECONNREFUSED, etc.) surface as TypeError
-    if (error instanceof TypeError || error?.code === "ECONNREFUSED") {
-      throw buildNotReachableError(host);
-    }
-    throw error;
+    throw buildFetchError(host, error);
   }
 }
 
@@ -155,14 +178,18 @@ export async function* chat({ model, messages, tools, format, stream = true, sig
       signal
     });
   } catch (error) {
-    if (error instanceof TypeError || error?.code === "ECONNREFUSED") {
-      throw buildNotReachableError(host);
-    }
-    throw error;
+    throw buildFetchError(host, error);
   }
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
+    // Detect the "model not pulled" case from Ollama's 404 response shape
+    // and surface a one-line actionable hint instead of the raw API string.
+    if (response.status === 404 && /model.*not found|try pulling|file does not exist/i.test(errorText)) {
+      throw new Error(
+        `Ollama model "${model}" is not available locally. Run \`ollama pull ${model}\` first, or pass a different --model.`
+      );
+    }
     throw new Error(`Ollama /api/chat error ${response.status}: ${errorText}`);
   }
 
