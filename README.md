@@ -2,8 +2,11 @@
 
 Use a local Ollama model from Claude Code to review code or delegate tasks.
 
-This plugin lets you run code reviews and background rescue tasks against a local
-[Ollama](https://ollama.com) server — no cloud account, no API key, no data leaving your machine.
+This plugin lets you run code reviews and background rescue tasks against an
+[Ollama](https://ollama.com) server — local by default, with optional access to
+hosted frontier models via Ollama Cloud (`:cloud` suffix). No OpenAI account, no
+API key plumbing, and your code stays on your hardware unless you explicitly
+choose a cloud-hosted model.
 
 ## Quickstart
 
@@ -47,6 +50,8 @@ This plugin lets you run code reviews and background rescue tasks against a loca
 
 See the `ollama-model-prompting` skill for full guidance. Short version:
 
+### Local models
+
 | Use case | Recommended model |
 |---|---|
 | General review (baseline) | `llama3.1:8b` |
@@ -54,9 +59,26 @@ See the `ollama-model-prompting` skill for full guidance. Short version:
 | Adversarial review | `deepseek-coder-v2:16b` |
 | Stop-review gate only | `qwen2.5:7b` |
 
-Tool-calling (required for the future agentic rescue mode) is reliable on Llama 3.1+,
-Qwen 2.5, and DeepSeek-Coder-V2. Smaller models (3B, 1B) and thinking-token models
-(DeepSeek-R1 distills) are unreliable for structured output.
+Tool-calling (used by the future agentic rescue mode) is reliable on Llama 3.1+,
+Qwen 2.5+/3+, DeepSeek-Coder-V2+, GPT-OSS, Gemma 3+, GLM 4+, Kimi K2+, and
+Granite 3. Smaller models (3B, 1B) and thinking-token models (DeepSeek-R1
+distills) are unreliable for structured output.
+
+### Cloud models (Ollama Cloud)
+
+If your hardware can't run a strong local model — or you want frontier-quality
+output for a tough adversarial review — Ollama Cloud exposes hosted models
+behind the same API via a `:cloud` suffix. The plugin treats them identically
+to local models; nothing in the plugin needs to change.
+
+| Use case | Recommended cloud model |
+|---|---|
+| Strongest adversarial review | `glm-5.1:cloud` or `kimi-k2.6:cloud` |
+| Code-heavy rescue / review | `qwen3-coder-next:cloud` |
+
+Cloud models send your diff context to Ollama's hosted endpoint — opt in by
+passing one explicitly via `--model` or `/ollama:setup --default-model`.
+Everything else stays local.
 
 Override the model on any command with `--model <name>`.
 
