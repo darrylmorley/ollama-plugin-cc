@@ -67,10 +67,17 @@ export function createJobRecord(base, options = {}) {
   };
 }
 
+// Throttle window for `lastMessage` disk writes. Phase changes still flush
+// immediately; this only applies to message-only updates within the same
+// phase so we don't hammer the FS on token-by-token streams.
+const LAST_MESSAGE_FLUSH_MS = 2000;
+
 export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastPhase = null;
   let lastThreadId = null;
   let lastTurnId = null;
+  let lastMessage = null;
+  let lastMessageWrittenAt = 0;
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
@@ -93,6 +100,19 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       lastTurnId = normalized.turnId;
       patch.turnId = normalized.turnId;
       changed = true;
+    }
+
+    // Track the most recent human-readable progress message. Always update
+    // on phase change (the new phase carries new context); otherwise only
+    // flush every LAST_MESSAGE_FLUSH_MS to avoid FS pressure on streams.
+    if (normalized.message && normalized.message !== lastMessage) {
+      lastMessage = normalized.message;
+      const now = Date.now();
+      if (changed || now - lastMessageWrittenAt > LAST_MESSAGE_FLUSH_MS) {
+        patch.lastMessage = normalized.message;
+        lastMessageWrittenAt = now;
+        changed = true;
+      }
     }
 
     if (!changed) {

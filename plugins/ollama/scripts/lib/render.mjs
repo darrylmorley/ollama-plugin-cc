@@ -130,6 +130,9 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
   }
+  if (job.lastMessage && job.status === "running") {
+    lines.push(`  Last update: ${job.lastMessage}`);
+  }
   if (options.showElapsed && job.elapsed) {
     lines.push(`  Elapsed: ${job.elapsed}`);
   }
