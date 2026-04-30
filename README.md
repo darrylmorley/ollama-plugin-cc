@@ -54,17 +54,20 @@ See the `ollama-model-prompting` skill for full guidance. Short version:
 
 ### Local models
 
-| Use case | Recommended model |
-|---|---|
-| General review (baseline) | `llama3.1:8b` |
-| Code-heavy review | `qwen2.5-coder:14b` |
-| Adversarial review | `deepseek-coder-v2:16b` |
-| Stop-review gate only | `qwen2.5:7b` |
+Empirically battle-tested against a SQL-injection fixture. See
+[`docs/MODELS.md`](docs/MODELS.md) for the full results table and reproducer.
 
-Tool-calling (required for agentic rescue) is reliable on Llama 3.1+,
+| Model | Review | Adv. review | Rescue | Best for |
+|---|---|---|---|---|
+| `gemma4:26b` | ✓ 68s | flaky | ✓ | Rescue (most resourceful when patches reject) |
+| `gpt-oss:20b` | ✓ 26s | ✓ 20s | ✓ | All-rounder, balanced size/quality |
+| `qwen3.6:27b-coding-nvfp4` | runner fault | runner fault | ✓ | Rescue only (Ollama mlx runner unstable on long prompts at the time of testing) |
+| `qwen3.5:9b` | ✓ 270s | ✓ 74s | ✓ | VRAM-constrained rigs (slow but works) |
+
+Tool-calling (used by agentic rescue) is reliable on Llama 3.1+,
 Qwen 2.5+/3+, DeepSeek-Coder-V2+, GPT-OSS, Gemma 3+, GLM 4+, Kimi K2+, and
-Granite 3. Smaller models (3B, 1B) and thinking-token models (DeepSeek-R1
-distills) are unreliable for structured output.
+Granite 3. Smaller models (3B, 1B), thinking-token models (DeepSeek-R1
+distills), and pre-3 Gemma fall back to patch-emit automatically.
 
 ### Cloud models (Ollama Cloud)
 
@@ -73,10 +76,11 @@ output for a tough adversarial review — Ollama Cloud exposes hosted models
 behind the same API via a `:cloud` suffix. The plugin treats them identically
 to local models; nothing in the plugin needs to change.
 
-| Use case | Recommended cloud model |
-|---|---|
-| Strongest adversarial review | `glm-5.1:cloud` or `kimi-k2.6:cloud` |
-| Code-heavy rescue / review | `qwen3-coder-next:cloud` |
+| Model | Review | Adv. review | Rescue | Notes |
+|---|---|---|---|---|
+| `glm-5.1:cloud` | ✓ 12s | ✓ 11s | ✓ | Fastest tested; clean structured output |
+| `kimi-k2.6:cloud` | not tested | not tested | not tested | 1T params; recommended for adversarial workloads |
+| `qwen3-coder-next:cloud` | not tested | not tested | not tested | 80B FP8; recommended for code-heavy rescue |
 
 Cloud models send your diff context to Ollama's hosted endpoint — opt in by
 passing one explicitly via `--model` or `/ollama:setup --default-model`.

@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] - 2026-04-30
+
+### Added
+
+- **Battle-test results** — `scripts/battle-test.mjs` runs review, adversarial-review, and rescue against a fixture for each model in a matrix and emits a markdown results table.
+- **`docs/MODELS.md`** — empirical recommendations for 5 tested models (qwen3.5:9b, gemma4:26b, gpt-oss:20b, qwen3.6:27b-coding-nvfp4, glm-5.1:cloud), with known gotchas and a reproducer.
+
+### Changed
+
+- **README model tables** — replaced the educated-guess recommendations from v0.1 with results-backed tables for both local and cloud models, including pass/fail and timings from the battle test.
+
+### Notes
+
+- All 5 tested models successfully fixed the SQL injection rescue task.
+- `qwen3.6:27b-coding-nvfp4` hit a server-side mlx runner crash on long-prompt review tasks; rescue (shorter tool-call messages) worked. Documented in MODELS.md.
+
 ## [0.7.0] - 2026-04-30
 
 ### Added
