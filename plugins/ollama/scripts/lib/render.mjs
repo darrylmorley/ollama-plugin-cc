@@ -103,8 +103,8 @@ function formatOllamaResumeCommand(job) {
   if (!job?.threadId) {
     return null;
   }
-  // TODO(phase-2): codex resume command not applicable after port; replace with Ollama session resume
-  return `codex resume ${job.threadId}`;
+  // Use the /ollama:rescue --resume command to continue a previous thread.
+  return `/ollama:rescue --resume`;
 }
 
 function appendActiveJobsTable(lines, jobs) {
@@ -402,8 +402,8 @@ export function renderJobStatusReport(job) {
 
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
-  // TODO(phase-2): codex resume command not applicable after port; replace with Ollama session resume
-  const resumeCommand = threadId ? `codex resume ${threadId}` : null;
+  // Use /ollama:rescue --resume to continue a previous thread.
+  const resumeCommand = threadId ? `/ollama:rescue --resume` : null;
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!threadId) {
@@ -415,7 +415,7 @@ export function renderStoredJobResult(job, storedJob) {
   const rawOutput =
     (typeof storedJob?.result?.rawOutput === "string" && storedJob.result.rawOutput) ||
     (typeof storedJob?.result?.ollama?.stdout === "string" && storedJob.result.ollama.stdout) ||
-    // TODO(phase-2): remove codex?.stdout fallback once all stored jobs use ollama key
+    // Legacy fallback: jobs stored before the ollama key was introduced used a codex key.
     (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
     "";
   if (rawOutput) {
