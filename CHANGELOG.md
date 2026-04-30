@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.0] - 2026-05-01
+
+### Added
+
+- **Full battle test across 8 models** — qwen3.5:9b, gemma4:26b, gpt-oss:20b, qwen3.6:27b-coding-nvfp4, batiai/qwen3.6-27b:q6, glm-5.1:cloud, kimi-k2.6:cloud, qwen3-coder-next:cloud. **All 8 passed rescue.**
+
+### Fixed
+
+- `scripts/battle-test.mjs` — driver now merges stderr into the classifier input, so the agentic-vs-patch-emit mode and iteration counts are accurate (was reporting all rescues as "patch-emit" with 0 iterations in v0.8).
+
+### Changed
+
+- README + `docs/MODELS.md` — full results table including the 3 previously-untested models (`batiai/qwen3.6-27b:q6`, `kimi-k2.6:cloud`, `qwen3-coder-next:cloud`) and corrected iteration counts for the 5 already-tested models.
+
+### Notable findings
+
+- `qwen3-coder-next:cloud` is the fastest tested model end-to-end (6–9 s per command).
+- Both qwen3.6 27B local variants drift off the JSON schema for review; use them only for rescue.
+- `kimi-k2.6:cloud` review path is flaky; adversarial works fine.
+
 ## [0.9.0] - 2026-05-01
 
 ### Added

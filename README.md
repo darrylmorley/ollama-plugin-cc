@@ -59,10 +59,11 @@ Empirically battle-tested against a SQL-injection fixture. See
 
 | Model | Review | Adv. review | Rescue | Best for |
 |---|---|---|---|---|
-| `gemma4:26b` | ✓ 68s | flaky | ✓ | Rescue (most resourceful when patches reject) |
-| `gpt-oss:20b` | ✓ 26s | ✓ 20s | ✓ | All-rounder, balanced size/quality |
-| `qwen3.6:27b-coding-nvfp4` | runner fault | runner fault | ✓ | Rescue only (Ollama mlx runner unstable on long prompts at the time of testing) |
-| `qwen3.5:9b` | ✓ 270s | ✓ 74s | ✓ | VRAM-constrained rigs (slow but works) |
+| `gpt-oss:20b` | ✓ 26s | ✓ 24s | ✓ 4 iter / 20s | All-rounder, balanced size/quality |
+| `gemma4:26b` | ✓ 69s | ✓ 110s | ✓ 5 iter / 29s | Rescue when patches reject; reliable structured output |
+| `qwen3.5:9b` | ✓ 79s | ✓ 74s | ✓ 3 iter / 44s | VRAM-constrained rigs (6.6 GB) |
+| `qwen3.6:27b-coding-nvfp4` | ✗ schema | flaky | ✓ 4 iter / 120s | Rescue only — review path unstable on Apple Silicon |
+| `batiai/qwen3.6-27b:q6` | ✗ schema | ✗ schema | ✓ 1 iter / 300s | Rescue only — review path drifts off schema |
 
 Tool-calling (used by agentic rescue) is reliable on Llama 3.1+,
 Qwen 2.5+/3+, DeepSeek-Coder-V2+, GPT-OSS, Gemma 3+, GLM 4+, Kimi K2+, and
@@ -78,9 +79,9 @@ to local models; nothing in the plugin needs to change.
 
 | Model | Review | Adv. review | Rescue | Notes |
 |---|---|---|---|---|
-| `glm-5.1:cloud` | ✓ 12s | ✓ 11s | ✓ | Fastest tested; clean structured output |
-| `kimi-k2.6:cloud` | not tested | not tested | not tested | 1T params; recommended for adversarial workloads |
-| `qwen3-coder-next:cloud` | not tested | not tested | not tested | 80B FP8; recommended for code-heavy rescue |
+| `qwen3-coder-next:cloud` | ✓ 6s | ✓ 6s | ✓ 3 iter / 9s | **Fastest across the board** — 80B FP8 |
+| `glm-5.1:cloud` | ✓ 63s | ✓ 47s | ✓ 6 iter / 29s | Reliable structured output; strong rescue |
+| `kimi-k2.6:cloud` | flaky | ✓ 113s | ✓ 3 iter / 13s | 1T params; review schema drift, adversarial fine |
 
 Cloud models send your diff context to Ollama's hosted endpoint — opt in by
 passing one explicitly via `--model` or `/ollama:setup --default-model`.
