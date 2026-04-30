@@ -125,6 +125,34 @@ function toolListDirectory({ path: dirPath }, { cwd }) {
 }
 
 /**
+ * write_file — write content to a file, creating parent directories if needed.
+ * Always overwrites. Refuses paths that escape cwd.
+ *
+ * @param {{ path: string, content: string }} args
+ * @param {{ cwd: string }} ctx
+ */
+function toolWriteFile({ path: filePath, content }, { cwd }) {
+  if (!filePath || typeof filePath !== "string") {
+    return { written: false, error: "path must be a non-empty string." };
+  }
+  if (typeof content !== "string") {
+    return { written: false, error: "content must be a string." };
+  }
+  try {
+    const resolved = path.resolve(cwd, filePath);
+    const cwdResolved = path.resolve(cwd);
+    if (resolved !== cwdResolved && !resolved.startsWith(cwdResolved + path.sep)) {
+      return { written: false, error: `Refusing to write outside working directory: ${filePath}` };
+    }
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    fs.writeFileSync(resolved, content, "utf8");
+    return { written: true, path: filePath, bytes: Buffer.byteLength(content, "utf8") };
+  } catch (err) {
+    return { written: false, error: err.message };
+  }
+}
+
+/**
  * apply_patch — apply a unified diff using `git apply`.
  * Checks first with --check; rejects on conflict (no --3way, no --reject).
  *
@@ -269,6 +297,8 @@ export function dispatchToolCall({ name, args, cwd, allowCommands, signal }) {
         return toolReadFile(args, ctx);
       case "list_directory":
         return toolListDirectory(args, ctx);
+      case "write_file":
+        return toolWriteFile(args, ctx);
       case "apply_patch":
         return toolApplyPatch(args, ctx);
       case "run_command":
@@ -276,7 +306,7 @@ export function dispatchToolCall({ name, args, cwd, allowCommands, signal }) {
       case "done":
         return toolDone(args);
       default:
-        return { error: `Unknown tool: "${name}". Available tools: read_file, list_directory, apply_patch, run_command, done.` };
+        return { error: `Unknown tool: "${name}". Available tools: read_file, list_directory, write_file, apply_patch, run_command, done.` };
     }
   } catch (err) {
     // Absolute last resort — no tool should throw, but guard anyway
@@ -323,6 +353,27 @@ export function buildToolSchemas() {
             path: {
               type: "string",
               description: "Path to the directory to list, relative to the working directory or absolute."
+            }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "write_file",
+        description: "Write content to a file, creating parent directories if needed. Always overwrites the file. Use this to create new files or completely rewrite existing ones — it is more reliable than apply_patch for non-trivial edits. Returns { written: true, path, bytes } on success.",
+        parameters: {
+          type: "object",
+          required: ["path", "content"],
+          properties: {
+            path: {
+              type: "string",
+              description: "Path to the file to write, relative to the working directory. Must stay within the working directory."
+            },
+            content: {
+              type: "string",
+              description: "The full file content to write. The file is overwritten in its entirety."
             }
           }
         }

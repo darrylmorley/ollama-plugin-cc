@@ -365,6 +365,52 @@ test("dispatchToolCall run_command: returns error for ENOENT command", () => {
   assert.ok(result.error, "should return an error when command is not found");
 });
 
+test("dispatchToolCall write_file: writes new file and returns byte count", () => {
+  const cwd = makeTempDir();
+  const result = dispatchToolCall({
+    name: "write_file",
+    args: { path: "newfile.txt", content: "hello world\n" },
+    cwd
+  });
+  assert.equal(result.written, true);
+  assert.equal(result.bytes, 12);
+  assert.equal(fs.readFileSync(path.join(cwd, "newfile.txt"), "utf8"), "hello world\n");
+});
+
+test("dispatchToolCall write_file: overwrites existing file", () => {
+  const cwd = makeTempDir();
+  fs.writeFileSync(path.join(cwd, "existing.txt"), "old content");
+  const result = dispatchToolCall({
+    name: "write_file",
+    args: { path: "existing.txt", content: "new content" },
+    cwd
+  });
+  assert.equal(result.written, true);
+  assert.equal(fs.readFileSync(path.join(cwd, "existing.txt"), "utf8"), "new content");
+});
+
+test("dispatchToolCall write_file: creates parent directories", () => {
+  const cwd = makeTempDir();
+  const result = dispatchToolCall({
+    name: "write_file",
+    args: { path: "a/b/c/deep.txt", content: "deep" },
+    cwd
+  });
+  assert.equal(result.written, true);
+  assert.equal(fs.readFileSync(path.join(cwd, "a/b/c/deep.txt"), "utf8"), "deep");
+});
+
+test("dispatchToolCall write_file: refuses path outside cwd", () => {
+  const cwd = makeTempDir();
+  const result = dispatchToolCall({
+    name: "write_file",
+    args: { path: "../escape.txt", content: "no" },
+    cwd
+  });
+  assert.equal(result.written, false);
+  assert.match(result.error, /outside working directory/i);
+});
+
 test("dispatchToolCall done: returns done=true and the summary", () => {
   const result = dispatchToolCall({
     name: "done",

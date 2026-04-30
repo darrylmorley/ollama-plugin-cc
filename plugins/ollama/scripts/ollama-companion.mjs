@@ -691,9 +691,10 @@ async function executeTaskRun(request) {
   } else {
     // ── Agentic mode (default) ──
     const systemPrompt = [
-      "You are an expert coding assistant with access to tools that let you read files, list directories, apply patches, and run commands.",
+      "You are an expert coding assistant with access to tools that let you read files, list directories, write files, apply patches, and run commands.",
       "Use read_file to inspect the relevant code before making changes.",
-      "Use apply_patch to make changes using unified diff format.",
+      "Use write_file to create new files or rewrite existing ones in full — this is the most reliable way to edit files.",
+      "Use apply_patch only for small, surgical edits where a unified diff is clearly easier than rewriting the file. apply_patch is strict and will reject any patch with mismatched context.",
       "Use run_command to run tests or verify your changes.",
       "When you are satisfied the task is complete, call done with a concise summary.",
       "Always call done when finished — do not return a plain-text answer without using tools first."
