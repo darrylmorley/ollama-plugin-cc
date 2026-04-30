@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderReviewResult, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
+import { renderReviewResult, renderStoredJobResult } from "../plugins/ollama/scripts/lib/render.mjs";
 
 test("renderReviewResult degrades gracefully when JSON is missing required review fields", () => {
   const output = renderReviewResult(
@@ -22,7 +22,7 @@ test("renderReviewResult degrades gracefully when JSON is missing required revie
     }
   );
 
-  assert.match(output, /Codex returned JSON with an unexpected review shape\./);
+  assert.match(output, /Ollama returned JSON with an unexpected review shape\./);
   assert.match(output, /Missing array `findings`\./);
   assert.match(output, /Raw final message:/);
 });
@@ -32,13 +32,13 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
     {
       id: "review-123",
       status: "completed",
-      title: "Codex Adversarial Review",
+      title: "Ollama Adversarial Review",
       jobClass: "review",
       threadId: "thr_123"
     },
     {
       threadId: "thr_123",
-      rendered: "# Codex Adversarial Review\n\nTarget: working tree diff\nVerdict: needs-attention\n",
+      rendered: "# Ollama Adversarial Review\n\nTarget: working tree diff\nVerdict: needs-attention\n",
       result: {
         result: {
           verdict: "needs-attention",
@@ -52,8 +52,9 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
     }
   );
 
-  assert.match(output, /^# Codex Adversarial Review/);
+  assert.match(output, /^# Ollama Adversarial Review/);
   assert.doesNotMatch(output, /^\{/);
-  assert.match(output, /Codex session ID: thr_123/);
-  assert.match(output, /Resume in Codex: codex resume thr_123/);
+  // TODO(phase-2): update session ID and resume command assertions once Ollama resume flow is implemented
+  assert.match(output, /Ollama session ID: thr_123/);
+  assert.match(output, /Resume in Ollama:/);
 });
