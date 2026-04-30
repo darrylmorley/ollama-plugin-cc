@@ -1,21 +1,21 @@
 {
-  "name": "openai-codex",
+  "name": "darrylmorley-ollama",
   "owner": {
-    "name": "OpenAI"
+    "name": "darrylmorley"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.4"
+    "description": "Ollama plugins to use in Claude Code for delegation and code review.",
+    "version": "0.1.0"
   },
   "plugins": [
     {
-      "name": "codex",
-      "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.4",
+      "name": "ollama",
+      "description": "Use Ollama from Claude Code to review code or delegate tasks.",
+      "version": "0.1.0",
       "author": {
-        "name": "OpenAI"
+        "name": "darrylmorley"
       },
-      "source": "./plugins/codex"
+      "source": "./plugins/ollama"
     }
   ]
 }

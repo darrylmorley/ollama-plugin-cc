@@ -13,11 +13,11 @@
     "types": ["node"]
   },
   "include": [
-    "plugins/codex/scripts/lib/app-server.mjs",
-    "plugins/codex/scripts/lib/codex.mjs",
-    "plugins/codex/scripts/lib/fs.mjs",
-    "plugins/codex/scripts/lib/process.mjs",
-    "plugins/codex/scripts/lib/app-server-protocol.d.ts",
-    "plugins/codex/.generated/app-server-types/**/*.ts"
+    "plugins/ollama/scripts/lib/app-server.mjs",
+    "plugins/ollama/scripts/lib/ollama.mjs",
+    "plugins/ollama/scripts/lib/fs.mjs",
+    "plugins/ollama/scripts/lib/process.mjs",
+    "plugins/ollama/scripts/lib/app-server-protocol.d.ts",
+    "plugins/ollama/.generated/app-server-types/**/*.ts"
   ]
 }

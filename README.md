@@ -1,36 +1,39 @@
-# Codex plugin for Claude Code
+# Ollama plugin for Claude Code
 
-Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
+Use Ollama from inside Claude Code for code reviews or to delegate tasks to Ollama.
 
-This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
+This plugin is for Claude Code users who want an easy way to start using Ollama from the workflow
 they already have.
 
+<!-- TODO(phase-5): update demo video -->
 <video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
 
 ## What You Get
 
-- `/codex:review` for a normal read-only Codex review
-- `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work and manage background jobs
+- `/ollama:review` for a normal read-only Ollama review
+- `/ollama:adversarial-review` for a steerable challenge review
+- `/ollama:rescue`, `/ollama:status`, `/ollama:result`, and `/ollama:cancel` to delegate work and manage background jobs
 
 ## Requirements
 
-- **ChatGPT subscription (incl. Free) or OpenAI API key.**
-  - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
+- **Ollama installed and running** — install from [ollama.com](https://ollama.com)
+  <!-- TODO(phase-2): document Ollama model requirements -->
 - **Node.js 18.18 or later**
 
 ## Install
 
+<!-- TODO(phase-5): update install instructions for Ollama plugin -->
+
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add darrylmorley/ollama-plugin-cc
 ```
 
 Install the plugin:
 
 ```bash
-/plugin install codex@openai-codex
+/plugin install ollama@darrylmorley-ollama
 ```
 
 Reload plugins:
@@ -42,41 +45,31 @@ Reload plugins:
 Then run:
 
 ```bash
-/codex:setup
+/ollama:setup
 ```
 
-`/codex:setup` will tell you whether Codex is ready. If Codex is missing and npm is available, it can offer to install Codex for you.
+`/ollama:setup` will tell you whether Ollama is ready. Install Ollama from [ollama.com](https://ollama.com) if needed.
 
-If you prefer to install Codex yourself, use:
-
-```bash
-npm install -g @openai/codex
-```
-
-If Codex is installed but not logged in yet, run:
-
-```bash
-!codex login
-```
+<!-- TODO(phase-2): replace Codex-specific install/login flow with Ollama setup guidance -->
 
 After install, you should see:
 
 - the slash commands listed below
-- the `codex:codex-rescue` subagent in `/agents`
+- the `ollama:ollama-rescue` subagent in `/agents`
 
 One simple first run is:
 
 ```bash
-/codex:review --background
-/codex:status
-/codex:result
+/ollama:review --background
+/ollama:status
+/ollama:result
 ```
 
 ## Usage
 
-### `/codex:review`
+### `/ollama:review`
 
-Runs a normal Codex review on your current work. It gives you the same quality of code review as running `/review` inside Codex directly.
+Runs a normal Ollama review on your current work.
 
 > [!NOTE]
 > Code review especially for multi-file changes might take a while. It's generally recommended to run it in the background.
@@ -86,26 +79,26 @@ Use it when you want:
 - a review of your current uncommitted changes
 - a review of your branch compared to a base branch like `main`
 
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
+Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/ollama:adversarial-review`](#ollamaadversarial-review) when you want to challenge a specific decision or risk area.
 
 Examples:
 
 ```bash
-/codex:review
-/codex:review --base main
-/codex:review --background
+/ollama:review
+/ollama:review --base main
+/ollama:review --background
 ```
 
-This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
+This command is read-only and will not perform any changes. When run in the background you can use [`/ollama:status`](#ollamastatus) to check on the progress and [`/ollama:cancel`](#ollamacancel) to cancel the ongoing task.
 
-### `/codex:adversarial-review`
+### `/ollama:adversarial-review`
 
 Runs a **steerable** review that questions the chosen implementation and design.
 
 It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
 
-It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/codex:review`, it can take extra focus text after the flags.
+It uses the same review target selection as `/ollama:review`, including `--base <ref>` for branch review.
+It also supports `--wait` and `--background`. Unlike `/ollama:review`, it can take extra focus text after the flags.
 
 Use it when you want:
 
@@ -116,22 +109,22 @@ Use it when you want:
 Examples:
 
 ```bash
-/codex:adversarial-review
-/codex:adversarial-review --base main challenge whether this was the right caching and retry design
-/codex:adversarial-review --background look for race conditions and question the chosen approach
+/ollama:adversarial-review
+/ollama:adversarial-review --base main challenge whether this was the right caching and retry design
+/ollama:adversarial-review --background look for race conditions and question the chosen approach
 ```
 
 This command is read-only. It does not fix code.
 
-### `/codex:rescue`
+### `/ollama:rescue`
 
-Hands a task to Codex through the `codex:codex-rescue` subagent.
+Hands a task to Ollama through the `ollama:ollama-rescue` subagent.
 
-Use it when you want Codex to:
+Use it when you want Ollama to:
 
 - investigate a bug
 - try a fix
-- continue a previous Codex task
+- continue a previous Ollama task
 - take a faster or cheaper pass with a smaller model
 
 > [!NOTE]
@@ -142,35 +135,35 @@ It supports `--background`, `--wait`, `--resume`, and `--fresh`. If you omit `--
 Examples:
 
 ```bash
-/codex:rescue investigate why the tests started failing
-/codex:rescue fix the failing test with the smallest safe patch
-/codex:rescue --resume apply the top fix from the last run
-/codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
-/codex:rescue --background investigate the regression
+/ollama:rescue investigate why the tests started failing
+/ollama:rescue fix the failing test with the smallest safe patch
+/ollama:rescue --resume apply the top fix from the last run
+/ollama:rescue --model llama3.2 --effort medium investigate the flaky integration test
+/ollama:rescue --background investigate the regression
 ```
 
-You can also just ask for a task to be delegated to Codex:
+You can also just ask for a task to be delegated to Ollama:
 
 ```text
-Ask Codex to redesign the database connection to be more resilient.
+Ask Ollama to redesign the database connection to be more resilient.
 ```
 
 **Notes:**
 
-- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
-- follow-up rescue requests can continue the latest Codex task in the repo
+- if you do not pass `--model` or `--effort`, Ollama chooses its own defaults.
+- follow-up rescue requests can continue the latest Ollama task in the repo
 
-### `/codex:status`
+<!-- TODO(phase-2): update model/effort notes for Ollama-specific model names -->
 
-Shows running and recent Codex jobs for the current repository.
+### `/ollama:status`
+
+Shows running and recent Ollama jobs for the current repository.
 
 Examples:
 
 ```bash
-/codex:status
-/codex:status task-abc123
+/ollama:status
+/ollama:status task-abc123
 ```
 
 Use it to:
@@ -179,127 +172,89 @@ Use it to:
 - see the latest completed job
 - confirm whether a task is still running
 
-### `/codex:result`
+### `/ollama:result`
 
-Shows the final stored Codex output for a finished job.
-When available, it also includes the Codex session ID so you can reopen that run directly in Codex with `codex resume <session-id>`.
+Shows the final stored Ollama output for a finished job.
+When available, it also includes the Ollama session ID.
 
-Examples:
-
-```bash
-/codex:result
-/codex:result task-abc123
-```
-
-### `/codex:cancel`
-
-Cancels an active background Codex job.
+<!-- TODO(phase-2): update session resume instructions once Ollama resume flow is implemented -->
 
 Examples:
 
 ```bash
-/codex:cancel
-/codex:cancel task-abc123
+/ollama:result
+/ollama:result task-abc123
 ```
 
-### `/codex:setup`
+### `/ollama:cancel`
 
-Checks whether Codex is installed and authenticated.
-If Codex is missing and npm is available, it can offer to install Codex for you.
+Cancels an active background Ollama job.
 
-You can also use `/codex:setup` to manage the optional review gate.
+Examples:
+
+```bash
+/ollama:cancel
+/ollama:cancel task-abc123
+```
+
+### `/ollama:setup`
+
+Checks whether Ollama is installed and running.
+
+<!-- TODO(phase-2): implement Ollama-specific setup checks -->
+
+You can also use `/ollama:setup` to manage the optional review gate.
 
 #### Enabling review gate
 
 ```bash
-/codex:setup --enable-review-gate
-/codex:setup --disable-review-gate
+/ollama:setup --enable-review-gate
+/ollama:setup --disable-review-gate
 ```
 
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
+When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Ollama review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
 
 > [!WARNING]
-> The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
+> The review gate can create a long-running Claude/Ollama loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
 
 ## Typical Flows
 
 ### Review Before Shipping
 
 ```bash
-/codex:review
+/ollama:review
 ```
 
-### Hand A Problem To Codex
+### Hand A Problem To Ollama
 
 ```bash
-/codex:rescue investigate why the build is failing in CI
+/ollama:rescue investigate why the build is failing in CI
 ```
 
 ### Start Something Long-Running
 
 ```bash
-/codex:adversarial-review --background
-/codex:rescue --background investigate the flaky test
+/ollama:adversarial-review --background
+/ollama:rescue --background investigate the flaky test
 ```
 
 Then check in with:
 
 ```bash
-/codex:status
-/codex:result
+/ollama:status
+/ollama:result
 ```
 
-## Codex Integration
+## Ollama Integration
 
-The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
+<!-- TODO(phase-2): rewrite Ollama Integration section once backend is wired up -->
 
-### Common Configurations
-
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
-
-```toml
-model = "gpt-5.4-mini"
-model_reasoning_effort = "high"
-```
-
-Your configuration will be picked up based on:
-
-- user-level config in `~/.codex/config.toml`
-- project-level overrides in `.codex/config.toml`
-- project-level overrides only load when the [project is trusted](https://developers.openai.com/codex/config-advanced#project-config-files-codexconfigtoml)
-
-Check out the Codex docs for more [configuration options](https://developers.openai.com/codex/config-reference).
-
-### Moving The Work Over To Codex
-
-Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be directly resumed inside Codex by running `codex resume` either with the specific session ID you received from running `/codex:result` or `/codex:status` or by selecting it from the list.
-
-This way you can review the Codex work or continue the work there.
+The Ollama plugin will wrap the Ollama HTTP API. It will use the local `ollama` binary installed in your environment.
 
 ## FAQ
 
-### Do I need a separate Codex account for this plugin?
+### Do I need a separate Ollama account for this plugin?
 
-If you are already signed into Codex on this machine, that account should work immediately here too. This plugin uses your local Codex CLI authentication.
+No. Ollama runs locally. No account is required.
 
-If you only use Claude Code today and have not used Codex yet, you will also need to sign in to Codex with either a ChatGPT account or an API key. [Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing/), and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready, and use `!codex login` if it is not.
-
-### Does the plugin use a separate Codex runtime?
-
-No. This plugin delegates through your local [Codex CLI](https://developers.openai.com/codex/cli/) and [Codex app server](https://developers.openai.com/codex/app-server/) on the same machine.
-
-That means:
-
-- it uses the same Codex install you would use directly
-- it uses the same local authentication state
-- it uses the same repository checkout and machine-local environment
-
-### Will it use the same Codex config I already have?
-
-Yes. If you already use Codex, the plugin picks up the same [configuration](#common-configurations).
-
-### Can I keep using my current API key or base URL setup?
-
-Yes. Because the plugin uses your local Codex CLI, your existing sign-in method and config still apply.
-
-If you need to point the built-in OpenAI provider at a different endpoint, set `openai_base_url` in your [Codex config](https://developers.openai.com/codex/config-advanced/#config-and-state-locations).
+<!-- TODO(phase-5): update FAQ for Ollama-specific questions -->
