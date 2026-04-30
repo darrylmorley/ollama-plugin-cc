@@ -1,260 +1,88 @@
-# Ollama plugin for Claude Code
+# ollama-plugin-cc
 
-Use Ollama from inside Claude Code for code reviews or to delegate tasks to Ollama.
+Use a local Ollama model from Claude Code to review code or delegate tasks.
 
-This plugin is for Claude Code users who want an easy way to start using Ollama from the workflow
-they already have.
+This plugin lets you run code reviews and background rescue tasks against a local
+[Ollama](https://ollama.com) server — no cloud account, no API key, no data leaving your machine.
 
-<!-- TODO(phase-5): update demo video -->
-<video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
+## Quickstart
 
-## What You Get
+1. **Install Ollama** — download the desktop app or follow the CLI instructions at [ollama.com](https://ollama.com).
 
-- `/ollama:review` for a normal read-only Ollama review
-- `/ollama:adversarial-review` for a steerable challenge review
-- `/ollama:rescue`, `/ollama:status`, `/ollama:result`, and `/ollama:cancel` to delegate work and manage background jobs
+2. **Pull a model**:
+   ```bash
+   ollama pull llama3.1:8b
+   ```
 
-## Requirements
+3. **Install the plugin** (placeholder — update once published to a marketplace):
+   ```bash
+   /plugin install ollama@darrylmorley/ollama-plugin-cc
+   ```
 
-- **Ollama installed and running** — install from [ollama.com](https://ollama.com)
-  <!-- TODO(phase-2): document Ollama model requirements -->
-- **Node.js 18.18 or later**
+4. **Run setup**:
+   ```bash
+   /ollama:setup
+   ```
+   Setup checks that Ollama is installed, running, and has at least one model. It also lets
+   you set a default model and optionally enable the stop-time review gate.
 
-## Install
+5. **Try a review**:
+   ```bash
+   /ollama:review
+   ```
 
-<!-- TODO(phase-5): update install instructions for Ollama plugin -->
+## Commands
 
-Add the marketplace in Claude Code:
+| Command | What it does |
+|---|---|
+| `/ollama:review` | Read-only review of current uncommitted changes or a branch diff |
+| `/ollama:adversarial-review` | Steerable review that challenges design decisions and tradeoffs |
+| `/ollama:rescue` | Delegates a task to Ollama; emits a diff for Claude to apply |
+| `/ollama:status` | Shows running and recent Ollama jobs for the current repo |
+| `/ollama:result` | Shows the stored output for a finished job |
+| `/ollama:cancel` | Cancels an active background job |
+| `/ollama:setup` | Checks Ollama readiness, pulls models, sets defaults, toggles review gate |
 
-```bash
-/plugin marketplace add darrylmorley/ollama-plugin-cc
-```
+## Model selection
 
-Install the plugin:
+See the `ollama-model-prompting` skill for full guidance. Short version:
 
-```bash
-/plugin install ollama@darrylmorley-ollama
-```
+| Use case | Recommended model |
+|---|---|
+| General review (baseline) | `llama3.1:8b` |
+| Code-heavy review | `qwen2.5-coder:14b` |
+| Adversarial review | `deepseek-coder-v2:16b` |
+| Stop-review gate only | `qwen2.5:7b` |
 
-Reload plugins:
+Tool-calling (required for the future agentic rescue mode) is reliable on Llama 3.1+,
+Qwen 2.5, and DeepSeek-Coder-V2. Smaller models (3B, 1B) and thinking-token models
+(DeepSeek-R1 distills) are unreliable for structured output.
 
-```bash
-/reload-plugins
-```
+Override the model on any command with `--model <name>`.
 
-Then run:
+## Configuration
 
-```bash
-/ollama:setup
-```
+| Variable | Description |
+|---|---|
+| `OLLAMA_HOST` | Ollama server URL (default: `http://127.0.0.1:11434`) |
+| `OLLAMA_PLUGIN_DEFAULT_MODEL` | Fallback model when `--model` is not passed and no per-workspace config is set |
 
-`/ollama:setup` will tell you whether Ollama is ready. Install Ollama from [ollama.com](https://ollama.com) if needed.
+Per-workspace config (set via `/ollama:setup --default-model`) is stored in the plugin state
+directory and takes precedence over `OLLAMA_PLUGIN_DEFAULT_MODEL`.
 
-<!-- TODO(phase-2): replace Codex-specific install/login flow with Ollama setup guidance -->
+## Capabilities and limits
 
-After install, you should see:
+- **Review and adversarial-review** work on any model that produces valid JSON. Structured
+  output uses Ollama's schema-constrained decoding (Ollama >= 0.5) for reliability.
+- **Rescue** currently runs in patch-emit mode: the model outputs a unified diff that Claude
+  Code applies. Agentic tool-calling (read/write/bash loop) is planned for a future release.
+- **Stop-review gate** uses a `Stop` hook — enable with `/ollama:setup --enable-review-gate`.
+  It can create long Claude/Ollama loops; only enable when actively monitoring the session.
+- **Background jobs** work for all long-running operations. Use `--background` and check
+  progress with `/ollama:status`.
+- **Node.js 18.18 or later** is required to run the companion script.
 
-- the slash commands listed below
-- the `ollama:ollama-rescue` subagent in `/agents`
+## Credits
 
-One simple first run is:
-
-```bash
-/ollama:review --background
-/ollama:status
-/ollama:result
-```
-
-## Usage
-
-### `/ollama:review`
-
-Runs a normal Ollama review on your current work.
-
-> [!NOTE]
-> Code review especially for multi-file changes might take a while. It's generally recommended to run it in the background.
-
-Use it when you want:
-
-- a review of your current uncommitted changes
-- a review of your branch compared to a base branch like `main`
-
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/ollama:adversarial-review`](#ollamaadversarial-review) when you want to challenge a specific decision or risk area.
-
-Examples:
-
-```bash
-/ollama:review
-/ollama:review --base main
-/ollama:review --background
-```
-
-This command is read-only and will not perform any changes. When run in the background you can use [`/ollama:status`](#ollamastatus) to check on the progress and [`/ollama:cancel`](#ollamacancel) to cancel the ongoing task.
-
-### `/ollama:adversarial-review`
-
-Runs a **steerable** review that questions the chosen implementation and design.
-
-It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
-
-It uses the same review target selection as `/ollama:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/ollama:review`, it can take extra focus text after the flags.
-
-Use it when you want:
-
-- a review before shipping that challenges the direction, not just the code details
-- review focused on design choices, tradeoffs, hidden assumptions, and alternative approaches
-- pressure-testing around specific risk areas like auth, data loss, rollback, race conditions, or reliability
-
-Examples:
-
-```bash
-/ollama:adversarial-review
-/ollama:adversarial-review --base main challenge whether this was the right caching and retry design
-/ollama:adversarial-review --background look for race conditions and question the chosen approach
-```
-
-This command is read-only. It does not fix code.
-
-### `/ollama:rescue`
-
-Hands a task to Ollama through the `ollama:ollama-rescue` subagent.
-
-Use it when you want Ollama to:
-
-- investigate a bug
-- try a fix
-- continue a previous Ollama task
-- take a faster or cheaper pass with a smaller model
-
-> [!NOTE]
-> Depending on the task and the model you choose these tasks might take a long time and it's generally recommended to force the task to be in the background or move the agent to the background.
-
-It supports `--background`, `--wait`, `--resume`, and `--fresh`. If you omit `--resume` and `--fresh`, the plugin can offer to continue the latest rescue thread for this repo.
-
-Examples:
-
-```bash
-/ollama:rescue investigate why the tests started failing
-/ollama:rescue fix the failing test with the smallest safe patch
-/ollama:rescue --resume apply the top fix from the last run
-/ollama:rescue --model llama3.2 --effort medium investigate the flaky integration test
-/ollama:rescue --background investigate the regression
-```
-
-You can also just ask for a task to be delegated to Ollama:
-
-```text
-Ask Ollama to redesign the database connection to be more resilient.
-```
-
-**Notes:**
-
-- if you do not pass `--model` or `--effort`, Ollama chooses its own defaults.
-- follow-up rescue requests can continue the latest Ollama task in the repo
-
-<!-- TODO(phase-2): update model/effort notes for Ollama-specific model names -->
-
-### `/ollama:status`
-
-Shows running and recent Ollama jobs for the current repository.
-
-Examples:
-
-```bash
-/ollama:status
-/ollama:status task-abc123
-```
-
-Use it to:
-
-- check progress on background work
-- see the latest completed job
-- confirm whether a task is still running
-
-### `/ollama:result`
-
-Shows the final stored Ollama output for a finished job.
-When available, it also includes the Ollama session ID.
-
-<!-- TODO(phase-2): update session resume instructions once Ollama resume flow is implemented -->
-
-Examples:
-
-```bash
-/ollama:result
-/ollama:result task-abc123
-```
-
-### `/ollama:cancel`
-
-Cancels an active background Ollama job.
-
-Examples:
-
-```bash
-/ollama:cancel
-/ollama:cancel task-abc123
-```
-
-### `/ollama:setup`
-
-Checks whether Ollama is installed and running.
-
-<!-- TODO(phase-2): implement Ollama-specific setup checks -->
-
-You can also use `/ollama:setup` to manage the optional review gate.
-
-#### Enabling review gate
-
-```bash
-/ollama:setup --enable-review-gate
-/ollama:setup --disable-review-gate
-```
-
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Ollama review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
-
-> [!WARNING]
-> The review gate can create a long-running Claude/Ollama loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
-
-## Typical Flows
-
-### Review Before Shipping
-
-```bash
-/ollama:review
-```
-
-### Hand A Problem To Ollama
-
-```bash
-/ollama:rescue investigate why the build is failing in CI
-```
-
-### Start Something Long-Running
-
-```bash
-/ollama:adversarial-review --background
-/ollama:rescue --background investigate the flaky test
-```
-
-Then check in with:
-
-```bash
-/ollama:status
-/ollama:result
-```
-
-## Ollama Integration
-
-<!-- TODO(phase-2): rewrite Ollama Integration section once backend is wired up -->
-
-The Ollama plugin will wrap the Ollama HTTP API. It will use the local `ollama` binary installed in your environment.
-
-## FAQ
-
-### Do I need a separate Ollama account for this plugin?
-
-No. Ollama runs locally. No account is required.
-
-<!-- TODO(phase-5): update FAQ for Ollama-specific questions -->
+Ported from [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), Apache 2.0.
+See `NOTICE` for attribution. This project is not affiliated with OpenAI or Anthropic.

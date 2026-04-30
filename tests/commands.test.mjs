@@ -182,7 +182,8 @@ test("setup command points users to Ollama install guidance", () => {
   const setup = read("commands/setup.md");
   // README assertions deferred to Phase 5 rewrite
 
-  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
+  // Phase 5: argument-hint now includes --pull and --default-model in addition to the gate flags
+  assert.match(setup, /argument-hint:.*--enable-review-gate.*--disable-review-gate/);
   assert.match(setup, /ollama-companion\.mjs" setup --json \$ARGUMENTS/);
   // TODO(phase-2): AskUserQuestion-based install flow removed; restore once Ollama setup flow is implemented
   assert.match(setup, /ollama\.com/i);

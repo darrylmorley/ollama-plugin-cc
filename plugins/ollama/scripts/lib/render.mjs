@@ -183,14 +183,25 @@ export function renderSetupReport(report) {
     "",
     "Checks:",
     `- node: ${report.node.detail}`,
-    `- npm: ${report.npm.detail}`,
-    // TODO(phase-2): remove codex?.detail fallback once setup payload uses ollama key exclusively
-    `- ollama: ${report.ollama?.detail ?? report.codex?.detail ?? "unknown"}`,
+    `- ollama binary: ${report.ollamaBinary?.detail ?? "unknown"}`,
+    `- ollama server: ${report.ollama?.detail ?? "unknown"}`,
     `- auth: ${report.auth.detail}`,
     `- session runtime: ${report.sessionRuntime.label}`,
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `- default model: ${report.defaultModel ?? "not set"}`,
     ""
   ];
+
+  if (Array.isArray(report.installedModels) && report.installedModels.length > 0) {
+    lines.push("Installed models:");
+    for (const m of report.installedModels) {
+      const tc = m.toolCalling === true ? "tool-calling: yes" : m.toolCalling === false ? "tool-calling: no" : "tool-calling: unknown";
+      lines.push(`- ${m.name} (${tc})`);
+    }
+    lines.push("");
+  } else if (report.ready) {
+    lines.push("No models installed. Run `ollama pull llama3.1:8b` to get started.", "");
+  }
 
   if (report.actionsTaken.length > 0) {
     lines.push("Actions taken:");

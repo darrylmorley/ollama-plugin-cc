@@ -14,8 +14,11 @@ import {
     getOllamaAuthStatus,
     getOllamaAvailability,
     getSessionRuntimeStatus,
+    health,
     interruptAppServerTurn,
+    listModels,
     parseStructuredOutput,
+    pullModel,
     readOutputSchema,
     runReview,
     runTask,
@@ -74,7 +77,7 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/ollama-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
+      "  node scripts/ollama-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--pull <model>] [--default-model <name>] [--json]",
       "  node scripts/ollama-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/ollama-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/ollama-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
@@ -176,31 +179,83 @@ function firstMeaningfulLine(text, fallback) {
   return line ?? fallback;
 }
 
+// Models that reliably support tool-calling for the agentic rescue flow.
+// Based on the matrix in plugins/ollama/skills/ollama-model-prompting/SKILL.md.
+const TOOL_CALLING_FAMILIES = [
+  /^llama3\.1/,
+  /^qwen2\.5/,
+  /^deepseek-coder-v2/,
+  /^mistral-large/,
+  /^mistral-nemo/
+];
+
+function modelSupportsToolCalling(name) {
+  const lower = String(name ?? "").toLowerCase();
+  for (const pattern of TOOL_CALLING_FAMILIES) {
+    if (pattern.test(lower)) {
+      return true;
+    }
+  }
+  return null; // unknown
+}
+
 async function buildSetupReport(cwd, actionsTaken = []) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
-  const npmStatus = binaryAvailable("npm", ["--version"], { cwd });
-  // TODO(phase-2): replace getOllamaAvailability / getOllamaAuthStatus with Ollama-specific checks
-  const ollamaStatus = getOllamaAvailability(cwd);
+  const ollamaBinaryStatus = binaryAvailable("ollama", ["--version"], { cwd });
+  // Use async health() for an accurate reachability check.
+  const reachable = await health();
+  const ollamaStatus = {
+    available: reachable,
+    detail: reachable
+      ? "Ollama is running and reachable"
+      : `Ollama not reachable. Run \`ollama serve\` (or \`brew services start ollama\` on macOS) then retry.`
+  };
   const authStatus = await getOllamaAuthStatus(cwd);
   const config = getConfig(workspaceRoot);
 
+  // List installed models if Ollama is reachable; annotate tool-calling support.
+  let installedModels = [];
+  if (reachable) {
+    try {
+      const raw = await listModels();
+      installedModels = raw.map((m) => ({
+        name: m.name,
+        size: m.size ?? null,
+        toolCalling: modelSupportsToolCalling(m.name)
+      }));
+    } catch {
+      // Non-fatal: we still report partial setup state
+    }
+  }
+
   const nextSteps = [];
-  if (!ollamaStatus.available) {
+  if (!ollamaBinaryStatus.available) {
     nextSteps.push("Install Ollama from https://ollama.com.");
+  }
+  if (!reachable) {
+    nextSteps.push("Start Ollama: run `ollama serve` (or `brew services start ollama` on macOS).");
+  }
+  if (reachable && installedModels.length === 0) {
+    nextSteps.push("Pull a model: `ollama pull llama3.1:8b` (baseline) or `ollama pull qwen2.5-coder:14b` (code-heavy).");
+  }
+  if (!config.defaultModel && !process.env.OLLAMA_PLUGIN_DEFAULT_MODEL) {
+    nextSteps.push("Set a default model: `/ollama:setup --default-model llama3.1:8b` or set OLLAMA_PLUGIN_DEFAULT_MODEL.");
   }
   if (!config.stopReviewGate) {
     nextSteps.push("Optional: run `/ollama:setup --enable-review-gate` to require a fresh review before stop.");
   }
 
   return {
-    ready: nodeStatus.available && ollamaStatus.available,
+    ready: nodeStatus.available && reachable,
     node: nodeStatus,
-    npm: npmStatus,
     ollama: ollamaStatus,
+    ollamaBinary: ollamaBinaryStatus,
     auth: authStatus,
     sessionRuntime: getSessionRuntimeStatus(process.env, workspaceRoot),
     reviewGateEnabled: Boolean(config.stopReviewGate),
+    defaultModel: config.defaultModel ?? process.env.OLLAMA_PLUGIN_DEFAULT_MODEL ?? null,
+    installedModels,
     actionsTaken,
     nextSteps
   };
@@ -208,7 +263,7 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "pull", "default-model"],
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
   });
 
@@ -226,6 +281,37 @@ async function handleSetup(argv) {
   } else if (options["disable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", false);
     actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+  }
+
+  if (options["default-model"]) {
+    const modelName = String(options["default-model"]).trim();
+    if (!modelName) {
+      throw new Error("--default-model requires a non-empty model name.");
+    }
+    setConfig(workspaceRoot, "defaultModel", modelName);
+    actionsTaken.push(`Set default model to "${modelName}" for ${workspaceRoot}.`);
+  }
+
+  if (options.pull) {
+    const modelName = String(options.pull).trim();
+    if (!modelName) {
+      throw new Error("--pull requires a model name, e.g. --pull llama3.1:8b");
+    }
+    // Stream pull progress to stderr so --json output on stdout stays clean.
+    process.stderr.write(`Pulling ${modelName}...\n`);
+    try {
+      await pullModel(modelName, (progress) => {
+        const status = progress.status ?? "";
+        const pct = (progress.total && progress.completed)
+          ? ` (${Math.round((progress.completed / progress.total) * 100)}%)`
+          : "";
+        process.stderr.write(`  ${status}${pct}\n`);
+      });
+      actionsTaken.push(`Pulled model "${modelName}".`);
+    } catch (error) {
+      process.stderr.write(`Pull failed: ${error.message}\n`);
+      actionsTaken.push(`Pull of "${modelName}" failed: ${error.message}`);
+    }
   }
 
   const finalReport = await buildSetupReport(cwd, actionsTaken);
