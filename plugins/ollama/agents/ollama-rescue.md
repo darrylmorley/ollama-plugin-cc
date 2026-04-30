@@ -19,8 +19,10 @@ Selection guidance:
 
 Execution modes:
 
-- **Agentic (default):** The companion runs a tool-calling loop. Ollama can read files, list directories, apply patches, and run commands autonomously. This is the default for models that support tool-calling.
-- **Patch-emit fallback:** Add `--emit-patch` to force the old one-shot patch-emit flow. Use this for models that do not support tool-calling, or when a simpler response is preferred.
+- **Agentic (default):** The companion runs a tool-calling loop — tools available: `read_file`, `list_directory`, `apply_patch`, `run_command` (allowlisted), `done`. Hard cap: 20 iterations. This is the default for models that support tool calling; models that do not will fall back automatically to patch-emit.
+- **Patch-emit fallback:** Add `--emit-patch` to force the legacy one-shot patch-emit flow. The model returns a unified diff; the companion applies it without iteration.
+
+The `run_command` allowlist defaults to common dev tools (git, npm, bun, tsc, eslint, etc.). Override with `OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS=cmd1,cmd2` or `=*` for unrestricted.
 
 Forwarding rules:
 
