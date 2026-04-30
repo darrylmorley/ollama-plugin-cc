@@ -476,31 +476,67 @@ async function executeReviewRun(request) {
     "Do not include any text outside the JSON object."
   ].join("\n\n");
 
-  const messages = [
+  const baseMessages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt }
   ];
 
-  const result = await runReview({
-    model: request.model,
-    messages,
-    schema,
-    onProgress: request.onProgress
-  });
+  // Try once with schema-mode; on parse or validation failure, retry once
+  // with a stricter reminder appended. Open-weight models occasionally drift
+  // even under format=<schema>; one retry with the parser's error usually
+  // recovers without doubling latency on the happy path.
+  const MAX_ATTEMPTS = 2;
+  let result;
+  let parsed;
+  let attempts = 0;
+  let messages = baseMessages;
 
-  const parsed = parseStructuredOutput(result.finalMessage, {
-    status: result.status,
-    failureMessage: result.error?.message ?? ""
-  });
+  while (attempts < MAX_ATTEMPTS) {
+    attempts += 1;
+    result = await runReview({
+      model: request.model,
+      messages,
+      schema,
+      onProgress: request.onProgress
+    });
 
-  // Validate parsed output against schema; emit clear error if it fails
-  if (parsed.parsed) {
-    const validationErrors = validateSchema(parsed.parsed, schema);
-    if (validationErrors.length > 0) {
+    if (result.status !== 0) break;
+
+    parsed = parseStructuredOutput(result.finalMessage, {
+      status: result.status,
+      failureMessage: result.error?.message ?? ""
+    });
+
+    if (parsed.parsed) {
+      const validationErrors = validateSchema(parsed.parsed, schema);
+      if (validationErrors.length === 0) break;
       parsed.parseError = `Schema validation failed:\n${validationErrors.join("\n")}`;
       parsed.parsed = null;
     }
+
+    if (attempts >= MAX_ATTEMPTS) break;
+
+    // Retry: append the failure to the conversation and ask again, harder.
+    messages = [
+      ...baseMessages,
+      { role: "assistant", content: result.finalMessage },
+      {
+        role: "user",
+        content: [
+          "Your previous response could not be used.",
+          `Error: ${parsed.parseError}`,
+          "Respond ONLY with a single valid JSON object matching the schema.",
+          "No prose, no markdown, no code fences. Start with { and end with }."
+        ].join("\n")
+      }
+    ];
   }
+
+  // Ensure parsed is defined for non-zero result paths
+  parsed = parsed ?? parseStructuredOutput(result.finalMessage ?? "", {
+    status: result.status,
+    failureMessage: result.error?.message ?? ""
+  });
 
   const payload = {
     review: reviewName,
@@ -515,7 +551,8 @@ async function executeReviewRun(request) {
       status: result.status,
       stderr: "",
       stdout: result.finalMessage,
-      reasoning: result.reasoningSummary
+      reasoning: result.reasoningSummary,
+      attempts
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
