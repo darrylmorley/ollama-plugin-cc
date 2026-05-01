@@ -27,6 +27,16 @@ import {
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { applyContextBudget, collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { estimateTokens, resolveBudget } from "./lib/token-budget.mjs";
+import { buildPlannerToolSchemas } from "./lib/agentic-tools.mjs";
+import {
+  appendRevision,
+  buildPlanRecord,
+  listPlans,
+  readPlan,
+  updatePlan,
+  validatePlanBody,
+  writePlan
+} from "./lib/plans.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -84,7 +94,13 @@ function printUsage() {
       "  node scripts/ollama-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/ollama-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/ollama-companion.mjs result [job-id] [--json]",
-      "  node scripts/ollama-companion.mjs cancel [job-id] [--json]"
+      "  node scripts/ollama-companion.mjs cancel [job-id] [--json]",
+      "  node scripts/ollama-companion.mjs plan \"<task>\" [--model <name>] [--json]",
+      "  node scripts/ollama-companion.mjs replan <plan-id> \"<feedback>\" [--model <name>] [--json]",
+      "  node scripts/ollama-companion.mjs plans [--json]",
+      "  node scripts/ollama-companion.mjs plan-show <plan-id> [--json]",
+      "  node scripts/ollama-companion.mjs plan-approve <plan-id> [--json]",
+      "  node scripts/ollama-companion.mjs execute-plan <plan-id> [--implementer <model>] [--verifier <model>] [--max-retries <N>] [--step <N>] [--resume-from <N>] [--dry-run] [--json]"
     ].join("\n")
   );
 }
@@ -110,6 +126,33 @@ function normalizeRequestedModel(model) {
     return null;
   }
   return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
+}
+
+/**
+ * Resolve a per-role model with this precedence:
+ *   1. CLI flag value (already normalized)
+ *   2. role-specific env var (OLLAMA_PLUGIN_<ROLE>_MODEL)
+ *   3. global OLLAMA_PLUGIN_DEFAULT_MODEL
+ * Returns null if nothing resolved.
+ */
+function resolveRoleModel(role, cliValue) {
+  if (cliValue) return cliValue;
+  const envName = `OLLAMA_PLUGIN_${role.toUpperCase()}_MODEL`;
+  const envValue = process.env[envName];
+  if (envValue) return normalizeRequestedModel(envValue);
+  if (process.env.OLLAMA_PLUGIN_DEFAULT_MODEL) {
+    return normalizeRequestedModel(process.env.OLLAMA_PLUGIN_DEFAULT_MODEL);
+  }
+  return null;
+}
+
+function requireModel(model, role) {
+  if (!model) {
+    throw new Error(
+      `No ${role} model configured. Pass --model <name>, set OLLAMA_PLUGIN_${role.toUpperCase()}_MODEL, or run /ollama:setup --default-model <name>.`
+    );
+  }
+  return model;
 }
 
 function normalizeReasoningEffort(effort) {
@@ -968,6 +1011,383 @@ async function handleReview(argv) {
   });
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Orchestrator pipeline (Phase 6 / v0.11): plan → execute-plan → review.
+// ───────────────────────────────────────────────────────────────────────────
+
+const PLAN_SYSTEM_PROMPT = [
+  "You are an expert software planner.",
+  "Use the read_file and list_directory tools to ground yourself in the actual codebase before producing a plan.",
+  "Your plan MUST be evidence-based: cite specific files (and line ranges where possible) you have actually read.",
+  "When you have enough information, call the `done` tool with a `summary` argument that contains ONLY a single JSON object matching this exact shape:",
+  "",
+  "{",
+  '  "task": "<verbatim user request>",',
+  '  "rationale": "<what you inspected and why this plan>",',
+  '  "confidence": <number 0-1, your honest self-assessment>,',
+  '  "scope": ["<files or globs>"],',
+  '  "steps": [',
+  '    {',
+  '      "id": 1,',
+  '      "description": "<what this step does>",',
+  '      "files": ["<file>", "<file:line-range>"],',
+  '      "successCriteria": ["<concrete check 1>", "<concrete check 2>"],',
+  '      "dependencies": []',
+  '    }',
+  '  ]',
+  "}",
+  "",
+  "Rules:",
+  "- The done summary MUST be valid JSON. No markdown fences, no prose before or after.",
+  "- Each step must be independently verifiable via its successCriteria.",
+  "- Steps should be ordered. Use `dependencies` (array of step ids) only when ordering is non-obvious.",
+  "- Set confidence honestly: 0.9+ when you have strong evidence the plan will work; 0.6 or below when the codebase is unfamiliar or the task is ambiguous.",
+  "- Do NOT propose write_file, apply_patch, or run_command — you are the planner, not the implementer."
+].join("\n");
+
+function tryExtractJson(text) {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  // Direct parse first.
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Try to find a JSON object inside the string (in case the model wrapped it).
+  }
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+  try {
+    return JSON.parse(trimmed.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+function renderPlanMarkdown(plan) {
+  const lines = [
+    `# Plan ${plan.id}`,
+    "",
+    `**Task:** ${plan.task}`,
+    `**Model:** ${plan.model ?? "(unknown)"}`,
+    `**Confidence:** ${plan.confidence?.toFixed?.(2) ?? plan.confidence}`,
+    `**Status:** ${plan.status}` + (plan.revision > 1 ? ` (revision ${plan.revision})` : ""),
+    "",
+    "## Rationale",
+    "",
+    plan.rationale,
+    ""
+  ];
+  if (Array.isArray(plan.scope) && plan.scope.length > 0) {
+    lines.push("## Scope", "", plan.scope.map((s) => `- ${s}`).join("\n"), "");
+  }
+  lines.push("## Steps", "");
+  for (const step of plan.steps) {
+    lines.push(`### Step ${step.id}: ${step.description}`);
+    if (Array.isArray(step.files) && step.files.length > 0) {
+      lines.push("", `**Files:** ${step.files.join(", ")}`);
+    }
+    if (Array.isArray(step.dependencies) && step.dependencies.length > 0) {
+      lines.push("", `**Depends on:** step${step.dependencies.length > 1 ? "s" : ""} ${step.dependencies.join(", ")}`);
+    }
+    lines.push("", "**Success criteria:**", ...step.successCriteria.map((c) => `- ${c}`), "");
+  }
+  lines.push(
+    "## Next",
+    "",
+    "Review the plan. To approve and execute:",
+    "",
+    "```",
+    `/ollama:execute-plan ${plan.id}`,
+    "```",
+    "",
+    "To refine before approving:",
+    "",
+    "```",
+    `/ollama:replan ${plan.id} "your feedback"`,
+    "```"
+  );
+  return lines.join("\n");
+}
+
+async function executePlannerRun({ task, model, cwd, onProgress, signal }) {
+  const messages = [
+    { role: "system", content: PLAN_SYSTEM_PROMPT },
+    { role: "user", content: `Plan this task:\n\n${task}` }
+  ];
+  const result = await runAgenticTask({
+    model,
+    messages,
+    onProgress,
+    signal,
+    cwd,
+    tools: buildPlannerToolSchemas(),
+    maxIterations: 30
+  });
+
+  const summary = result.finalMessage ?? "";
+  const parsed = tryExtractJson(summary);
+  if (!parsed) {
+    throw new Error(
+      "Planner did not return a parseable JSON plan. Raw output:\n" + summary.slice(0, 800)
+    );
+  }
+  // Force the model's "task" field to match the user's actual request.
+  parsed.task = task;
+  const errors = validatePlanBody(parsed);
+  if (errors.length > 0) {
+    throw new Error("Planner output failed validation:\n- " + errors.join("\n- "));
+  }
+  return { planBody: parsed, agenticResult: result };
+}
+
+async function handlePlan(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["model", "cwd"],
+    booleanOptions: ["json"],
+    aliasMap: { m: "model" }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  ensureOllamaAvailable(cwd);
+  const model = requireModel(resolveRoleModel("planner", normalizeRequestedModel(options.model)), "planner");
+
+  const task = positionals.join(" ").trim();
+  if (!task) {
+    throw new Error("Usage: ollama-companion plan \"<task description>\" [--model <name>]");
+  }
+
+  const { planBody } = await executePlannerRun({
+    task,
+    model,
+    cwd,
+    onProgress: (event) => {
+      const message = typeof event === "string" ? event : event?.message;
+      if (message) process.stderr.write(`[ollama] ${message}\n`);
+    }
+  });
+
+  const plan = buildPlanRecord(planBody, { model });
+  const persisted = writePlan(cwd, plan);
+
+  const rendered = renderPlanMarkdown(persisted);
+  outputCommandResult(persisted, rendered, options.json);
+}
+
+async function handleReplan(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["model", "cwd"],
+    booleanOptions: ["json"],
+    aliasMap: { m: "model" }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  ensureOllamaAvailable(cwd);
+  const model = requireModel(resolveRoleModel("planner", normalizeRequestedModel(options.model)), "planner");
+
+  const [planId, ...feedbackParts] = positionals;
+  const feedback = feedbackParts.join(" ").trim();
+  if (!planId || !feedback) {
+    throw new Error("Usage: ollama-companion replan <plan-id> \"<feedback>\" [--model <name>]");
+  }
+  const existing = readPlan(cwd, planId);
+  if (!existing) throw new Error(`Plan ${planId} not found.`);
+  if (existing.status === "executing" || existing.status === "complete") {
+    throw new Error(`Plan ${planId} is ${existing.status}; cannot replan.`);
+  }
+
+  const refinePrompt = [
+    `You are refining an existing plan. Read the original plan and the user's feedback, then emit a NEW plan in the same JSON format.`,
+    "",
+    `Original task: ${existing.task}`,
+    "",
+    `Original plan (revision ${existing.revision}):`,
+    JSON.stringify({ rationale: existing.rationale, confidence: existing.confidence, steps: existing.steps, scope: existing.scope }, null, 2),
+    "",
+    `User feedback: ${feedback}`,
+    "",
+    "Apply the feedback. Use read_file and list_directory if you need fresh evidence. Then call done with the new plan as JSON."
+  ].join("\n");
+
+  const messages = [
+    { role: "system", content: PLAN_SYSTEM_PROMPT },
+    { role: "user", content: refinePrompt }
+  ];
+  const result = await runAgenticTask({
+    model,
+    messages,
+    cwd,
+    tools: buildPlannerToolSchemas(),
+    maxIterations: 30,
+    onProgress: (event) => {
+      const message = typeof event === "string" ? event : event?.message;
+      if (message) process.stderr.write(`[ollama] ${message}\n`);
+    }
+  });
+  const parsed = tryExtractJson(result.finalMessage ?? "");
+  if (!parsed) throw new Error("Replan did not return a parseable JSON plan.");
+  parsed.task = existing.task;
+  const errors = validatePlanBody(parsed);
+  if (errors.length > 0) throw new Error("Replan output failed validation:\n- " + errors.join("\n- "));
+
+  const updated = appendRevision(cwd, planId, parsed, feedback);
+  outputCommandResult(updated, renderPlanMarkdown(updated), options.json);
+}
+
+async function handlePlansList(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const plans = listPlans(cwd);
+  if (options.json) {
+    outputResult(plans, true);
+    return;
+  }
+  if (plans.length === 0) {
+    outputResult("No plans yet. Create one with `/ollama:plan \"<task>\"`.", false);
+    return;
+  }
+  const lines = ["# Plans", ""];
+  for (const p of plans) {
+    lines.push(`- \`${p.id}\` — ${p.status} — rev ${p.revision} — ${p.task}`);
+  }
+  outputResult(lines.join("\n"), false);
+}
+
+async function handlePlanShow(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const planId = positionals[0];
+  if (!planId) throw new Error("Usage: ollama-companion plan-show <plan-id>");
+  const plan = readPlan(cwd, planId);
+  if (!plan) throw new Error(`Plan ${planId} not found.`);
+  outputCommandResult(plan, renderPlanMarkdown(plan), options.json);
+}
+
+async function handleExecutePlan(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["implementer", "verifier", "max-retries", "step", "resume-from", "cwd"],
+    booleanOptions: ["json", "dry-run", "background"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const planId = positionals[0];
+  if (!planId) throw new Error("Usage: ollama-companion execute-plan <plan-id> [flags]");
+  const plan = readPlan(cwd, planId);
+  if (!plan) throw new Error(`Plan ${planId} not found.`);
+
+  // Allow approve-on-execute for ergonomic UX. Reject if plan is already
+  // complete or failed (use replan first).
+  if (plan.status === "complete") throw new Error(`Plan ${planId} is already complete.`);
+  if (plan.status === "executing") throw new Error(`Plan ${planId} is already executing.`);
+
+  const dryRun = Boolean(options["dry-run"]);
+  if (!dryRun) ensureOllamaAvailable(cwd);
+
+  const implementerModel = requireModel(
+    resolveRoleModel("implementer", normalizeRequestedModel(options.implementer)),
+    "implementer"
+  );
+  const verifierModel = requireModel(
+    resolveRoleModel("verifier", normalizeRequestedModel(options.verifier))
+      ?? resolveRoleModel("planner", null),
+    "verifier"
+  );
+  const maxRetries = Number(options["max-retries"] ?? 3);
+  const singleStep = options.step != null ? Number(options.step) : null;
+  const resumeFrom = options["resume-from"] != null ? Number(options["resume-from"]) : 1;
+
+  const allowCommands = process.env.OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS;
+  const onProgress = (event) => {
+    const m = typeof event === "string" ? event : event?.message;
+    const phase = typeof event === "object" ? event?.phase : null;
+    if (m) process.stderr.write(`[ollama] ${phase ? `[${phase}] ` : ""}${m}\n`);
+  };
+
+  const { executePlan } = await import("./lib/pipeline.mjs");
+  const report = await executePlan({
+    plan,
+    cwd,
+    implementerModel,
+    verifierModel,
+    maxRetries,
+    singleStep,
+    resumeFrom,
+    dryRun,
+    allowCommands,
+    onProgress
+  });
+
+  const finalPlan = readPlan(cwd, planId);
+  const rendered = renderExecuteReport(finalPlan, report, { implementerModel, verifierModel });
+  outputCommandResult({ plan: finalPlan, report }, rendered, options.json);
+}
+
+function renderExecuteReport(plan, report, models) {
+  const lines = [
+    `# Execute plan ${plan.id}`,
+    "",
+    `**Status:** ${report.status}` + (report.stuckAt != null ? ` (stuck at step ${report.stuckAt})` : ""),
+    `**Implementer:** ${models.implementerModel}`,
+    `**Verifier:** ${models.verifierModel}`,
+    "",
+    "## Steps",
+    ""
+  ];
+  for (const r of report.stepReports) {
+    const prefix = r.status === "complete" ? "✓"
+                 : r.status === "failed"   ? "✗"
+                 : r.status === "skipped"  ? "·"
+                 : r.status === "blocked"  ? "⊘"
+                 : "?";
+    const summary = r.verifier?.summary ? ` — ${r.verifier.summary.slice(0, 160)}` : (r.reason ? ` — ${r.reason}` : "");
+    const attempts = r.attempts ? ` (${r.attempts} attempt${r.attempts > 1 ? "s" : ""})` : "";
+    lines.push(`- ${prefix} step ${r.stepId}: ${r.status}${attempts}${summary}`);
+  }
+  lines.push("");
+  if (report.status === "complete") {
+    lines.push("All steps passed verification. Review the cumulative diff:");
+    lines.push("");
+    lines.push("```");
+    lines.push(`git diff <merge-base>..HEAD  # checkpoint commits per step`);
+    lines.push("```");
+  } else if (report.status === "stuck") {
+    const stuckReport = report.stepReports.find((r) => r.status === "failed");
+    if (stuckReport?.verifier?.remediation) {
+      lines.push(`**Suggested remediation:** ${stuckReport.verifier.remediation}`);
+      lines.push("");
+    }
+    lines.push(`Refine the plan and retry from this step:`);
+    lines.push("");
+    lines.push("```");
+    lines.push(`/ollama:replan ${plan.id} "<your refinement>"`);
+    lines.push(`/ollama:execute-plan ${plan.id} --resume-from ${report.stuckAt}`);
+    lines.push("```");
+  }
+  return lines.join("\n");
+}
+
+async function handlePlanApprove(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const planId = positionals[0];
+  if (!planId) throw new Error("Usage: ollama-companion plan-approve <plan-id>");
+  const plan = readPlan(cwd, planId);
+  if (!plan) throw new Error(`Plan ${planId} not found.`);
+  if (plan.status === "complete" || plan.status === "executing") {
+    throw new Error(`Plan ${planId} is already ${plan.status}.`);
+  }
+  const updated = updatePlan(cwd, planId, { status: "approved" });
+  outputCommandResult(updated, `Plan ${planId} approved.`, options.json);
+}
+
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
@@ -1258,6 +1678,24 @@ async function main() {
       break;
     case "cancel":
       await handleCancel(argv);
+      break;
+    case "plan":
+      await handlePlan(argv);
+      break;
+    case "replan":
+      await handleReplan(argv);
+      break;
+    case "plans":
+      await handlePlansList(argv);
+      break;
+    case "plan-show":
+      await handlePlanShow(argv);
+      break;
+    case "plan-approve":
+      await handlePlanApprove(argv);
+      break;
+    case "execute-plan":
+      await handleExecutePlan(argv);
       break;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);

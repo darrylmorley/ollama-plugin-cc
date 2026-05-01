@@ -322,6 +322,18 @@ export function dispatchToolCall({ name, args, cwd, allowCommands, signal }) {
  * Return the array of tool definitions in Ollama's tool-calling format.
  * @returns {Array<object>}
  */
+/**
+ * Return read-only tool definitions for the planner. Includes read_file,
+ * list_directory, and done — no write_file, apply_patch, or run_command.
+ * Used by /ollama:plan to ground the plan in the codebase without risk
+ * of edits.
+ */
+export function buildPlannerToolSchemas() {
+  return buildToolSchemas().filter((t) =>
+    ["read_file", "list_directory", "done"].includes(t.function.name)
+  );
+}
+
 export function buildToolSchemas() {
   return [
     {

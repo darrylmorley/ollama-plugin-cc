@@ -587,9 +587,10 @@ export async function runAgenticTask({
   signal,
   maxIterations = 20,
   cwd = process.cwd(),
-  allowCommands
+  allowCommands,
+  tools: customTools
 } = {}) {
-  const tools = buildToolSchemas();
+  const tools = customTools ?? buildToolSchemas();
   const toolCallLog = [];       // full record of every tool call for the job log
   const touchedFiles = [];      // files touched by apply_patch
   const commandExecutions = []; // commands run by run_command
@@ -879,21 +880,39 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
     };
   }
 
-  try {
-    return {
-      parsed: JSON.parse(rawOutput),
-      parseError: null,
-      rawOutput,
-      ...fallback
-    };
-  } catch (error) {
-    return {
-      parsed: null,
-      parseError: error.message,
-      rawOutput,
-      ...fallback
-    };
+  // Strip common markdown wrappers that some models still emit even under
+  // schema-mode (e.g. ```json ... ``` fences). Try two cleanups in sequence.
+  function stripFences(text) {
+    const fenced = text.match(/```(?:json|JSON)?\s*([\s\S]*?)```/);
+    if (fenced) return fenced[1].trim();
+    return text.trim();
   }
+  function extractFirstObject(text) {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) return null;
+    return text.slice(start, end + 1);
+  }
+
+  const cleaned = stripFences(rawOutput);
+  for (const candidate of [cleaned, extractFirstObject(cleaned)].filter(Boolean)) {
+    try {
+      return {
+        parsed: JSON.parse(candidate),
+        parseError: null,
+        rawOutput,
+        ...fallback
+      };
+    } catch {
+      // try next candidate
+    }
+  }
+  return {
+    parsed: null,
+    parseError: "Could not parse JSON from model output.",
+    rawOutput,
+    ...fallback
+  };
 }
 
 /**
