@@ -105,7 +105,8 @@ directory and takes precedence over `OLLAMA_PLUGIN_DEFAULT_MODEL`.
 - **Review and adversarial-review** work on any model that produces valid JSON. Structured
   output uses Ollama's schema-constrained decoding (Ollama >= 0.5) for reliability.
 - **Rescue** runs an agentic tool-calling loop by default: the model can read files, list
-  directories, apply patches, and run allowlisted commands autonomously (hard cap: 20 iterations).
+  directories, write files, apply patches, and run allowlisted commands autonomously (hard cap:
+  20 iterations).
   Use `--emit-patch` to force the legacy one-shot diff output instead. Models that do not support
   tool calling fall back to patch-emit automatically. Override the command allowlist with
   `OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS=cmd1,cmd2` (or `=*` for unrestricted).
@@ -114,6 +115,14 @@ directory and takes precedence over `OLLAMA_PLUGIN_DEFAULT_MODEL`.
 - **Background jobs** work for all long-running operations. Use `--background` and check
   progress with `/ollama:status`.
 - **Node.js 18.18 or later** is required to run the companion script.
+
+## Documentation
+
+- [`docs/MODELS.md`](docs/MODELS.md) — empirical model recommendations + battle-test results
+- [`docs/API.md`](docs/API.md) — public vs internal surface for v1.x
+- [`docs/SMOKE-TEST.md`](docs/SMOKE-TEST.md) — pre-release verification checklist
+- [`docs/PLAN-v1.md`](docs/PLAN-v1.md) — v0.1 → v1.0 roadmap and status
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes
 
 ## Credits
 

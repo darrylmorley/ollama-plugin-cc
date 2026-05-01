@@ -2,6 +2,8 @@
 
 A step-by-step plan to take the shipped [v0.1.0](https://github.com/darrylmorley/ollama-plugin-cc/releases/tag/v0.1.0) baseline to a stable v1.0.0 marketplace launch.
 
+> **Status (2026-05-01):** Phases 1–4 complete (v0.5.0 → v0.10.0). Phase 5 (marketplace + v1.0 tag) is the only remaining work.
+
 The single biggest functional gap from v0.1 vs the upstream Codex plugin is `/ollama:rescue` — currently patch-emit only, vs Codex's agentic tool-calling loop. Phase 1 of this roadmap closes that gap; everything else is polish, hardening, and release engineering.
 
 ---
@@ -27,7 +29,7 @@ The single biggest functional gap from v0.1 vs the upstream Codex plugin is `/ol
 
 ---
 
-## Phase 1 — Agentic rescue (the headline feature)
+## Phase 1 — Agentic rescue (the headline feature) ✅ v0.5.0
 
 This is the marquee v1 feature. ~3–4 days. Splits into design + implementation.
 
@@ -69,7 +71,7 @@ Each tool call (read, patch, command) goes in the job log. Background runs can b
 
 ---
 
-## Phase 2 — Diff context discipline
+## Phase 2 — Diff context discipline ✅ v0.6.0
 
 ~1 day. Companion to Phase 1: the agent works better when it gets the right context up front.
 
@@ -84,7 +86,7 @@ Rescue prompt should explicitly instruct: "Use `read_file` to load the relevant 
 
 ---
 
-## Phase 3 — Hardening & polish
+## Phase 3 — Hardening & polish ✅ v0.7.0 + v0.9.0
 
 ~2 days. Items that don't change behavior but make v1.0 a real release.
 
@@ -127,7 +129,7 @@ Add to `docs/API.md`. Sets up semver discipline for v1.x.
 
 ---
 
-## Phase 4 — Battle test
+## Phase 4 — Battle test ✅ v0.8.0 (5 models) + v0.10.0 (full 8 models)
 
 ~1 day. Empirical evidence backing the README's claims.
 
@@ -148,7 +150,7 @@ A short troubleshooting section: "If you see X, try model Y." Lives in the READM
 
 ---
 
-## Phase 5 — Release engineering
+## Phase 5 — Release engineering ⏳ pending
 
 ~½ day.
 

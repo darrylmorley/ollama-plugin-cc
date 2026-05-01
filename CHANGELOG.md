@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.1] - 2026-05-01
+
+### Documentation pass
+
+- `docs/MODELS.md` — added "finding count is stylistic, not signal" caveat with per-model output samples (per-site splitter vs bundler).
+- `docs/SMOKE-TEST.md` — refreshed for v0.5+ (agentic rescue path, recommended models, link to battle-test driver, `Last update:` line in status).
+- `docs/PLAN-v1.md` — phases 1–4 marked complete with version tags; status line at the top.
+- `plugins/ollama/skills/ollama-model-prompting/SKILL.md` — replaced v0.1 educated-guess recommendations with battle-tested table; flagged review-flaky models.
+- `plugins/ollama/skills/ollama-cli-runtime/SKILL.md` — documented `--emit-patch` forwarding rule; clarified that `--effort` is currently inert (no Ollama equivalent of Codex reasoning-effort).
+- `README.md` — added documentation cross-links section; corrected agentic rescue tool list (was missing `write_file`).
+
+No code changes; tests still 91/91.
+
 ## [0.10.0] - 2026-05-01
 
 ### Added

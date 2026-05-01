@@ -12,14 +12,20 @@ Reference this skill when deciding which model to use and how to shape prompts f
 
 ## Recommended Models Per Use Case
 
-| Use case | Recommended model | Notes |
+Empirically battle-tested. See [`docs/MODELS.md`](../../../../docs/MODELS.md) for the full results table, finding-count caveat, and reproducer.
+
+| Use case | First choice | Notes |
 |---|---|---|
-| General review, baseline | `llama3.1:8b` | Fast, wide availability, sufficient for basic review |
-| Code-heavy review | `qwen2.5-coder:14b` | Strong code understanding, reliable JSON output |
-| Adversarial review | `deepseek-coder-v2:16b` | Best reasoning depth for adversarial analysis |
-| Stop-review gate only | `qwen2.5:7b` | Minimal viable; handles the single-line ALLOW/BLOCK format |
+| Cloud, anything | `qwen3-coder-next:cloud` | Fastest tested anywhere (6–9 s per command). |
+| Cloud, alt | `glm-5.1:cloud` | Reliable structured output; clean rescue. |
+| Local all-rounder | `gpt-oss:20b` | Fastest local; reliable JSON; ~14 GB. |
+| Local rescue | `gemma4:26b` | Most resourceful when `apply_patch` rejects. |
+| VRAM-constrained | `qwen3.5:9b` | 6.6 GB; works on every command. |
+| Stop-review gate only | `qwen3.5:9b` or `gpt-oss:20b` | Either handles the single-line ALLOW/BLOCK format. |
 
 Select via `--model <name>` on any companion command. Falls back to `OLLAMA_PLUGIN_DEFAULT_MODEL` if set, otherwise the companion will error and prompt you to run `/ollama:setup`.
+
+Models known to drift on the review JSON schema (use rescue-only or avoid): `qwen3.6:27b-coding-nvfp4`, `batiai/qwen3.6-27b:q6`, `kimi-k2.6:cloud` (review only — adversarial works).
 
 ---
 
