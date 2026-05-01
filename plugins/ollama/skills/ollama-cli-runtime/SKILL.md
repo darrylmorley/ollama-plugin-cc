@@ -47,7 +47,8 @@ See the `ollama-model-prompting` skill for model selection guidance.
 - Use exactly one `task` invocation per rescue handoff.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, pass it through to `task`.
-- If the forwarded request includes `--effort`, pass it through to `task`.
+- If the forwarded request includes `--effort`, pass it through to `task`. (The flag is accepted but currently inert — Ollama exposes no equivalent of Codex's reasoning-effort knob.)
+- If the forwarded request includes `--emit-patch`, pass it through. This forces the legacy patch-emit flow (the model returns a unified diff) instead of the default agentic tool-calling loop.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.

@@ -50,6 +50,30 @@ rescue.** Review and adversarial-review pass rates vary by model.
 All 8 models successfully fixed the rescue task. Iteration counts are now
 captured correctly (the v0.8.0 driver had a stdout/stderr split bug).
 
+### Reading the findings count: stylistic, not signal
+
+The "findings" column above counts top-level finding objects. **More findings
+≠ more thorough.** Models differ in how they group issues:
+
+- **Per-site splitters** (`qwen3.5:9b`, `glm-5.1:cloud`): one finding per
+  vulnerable line/function. Easier for line-by-line triage.
+- **Bundlers** (`gpt-oss:20b`): one finding spanning a line range, e.g.
+  `buggy.js:4-10`. Easier for executive summaries.
+- **Run-to-run variance**: `qwen3.5:9b` produced 3 findings in one run and
+  2 in a re-run on the identical fixture. The 3rd was an additional secondary
+  concern (input validation), not a duplicate.
+
+Sample output from the SQL injection fixture:
+
+| Style | Model | Findings |
+|---|---|---|
+| Per-site | `qwen3.5:9b` | `[critical] SQL Injection in findUser (buggy.js:4)` + `[critical] SQL Injection in deleteUser (buggy.js:9)` |
+| Bundled | `gpt-oss:20b` | `[critical] SQL Injection via String Concatenation (buggy.js:4-10)` |
+| Per-site | `glm-5.1:cloud` | Two `[critical]` SQL injection findings, one per function |
+
+Both styles correctly identified all real issues. Pick by triage workflow,
+not by raw count.
+
 ## Recommendations by use case
 
 | Use case | First choice | Why |
