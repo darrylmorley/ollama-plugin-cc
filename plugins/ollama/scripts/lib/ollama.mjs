@@ -587,9 +587,10 @@ export async function runAgenticTask({
   signal,
   maxIterations = 20,
   cwd = process.cwd(),
-  allowCommands
+  allowCommands,
+  tools: customTools
 } = {}) {
-  const tools = buildToolSchemas();
+  const tools = customTools ?? buildToolSchemas();
   const toolCallLog = [];       // full record of every tool call for the job log
   const touchedFiles = [];      // files touched by apply_patch
   const commandExecutions = []; // commands run by run_command
