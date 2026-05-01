@@ -23,6 +23,18 @@ function plansDir(workspaceRoot) {
 function ensurePlansDir(workspaceRoot) {
   const dir = plansDir(workspaceRoot);
   fs.mkdirSync(dir, { recursive: true });
+  // Auto-gitignore the entire .ollama/ directory so plan files don't appear
+  // as dirty working-tree state. We write a marker `.gitignore` inside the
+  // .ollama/ root only — never above it, so we never touch the user's repo.
+  const ollamaRoot = path.dirname(dir);
+  const ignoreFile = path.join(ollamaRoot, ".gitignore");
+  if (!fs.existsSync(ignoreFile)) {
+    try {
+      fs.writeFileSync(ignoreFile, "*\n", "utf8");
+    } catch {
+      // best-effort; don't fail plan creation if we can't write the gitignore
+    }
+  }
   return dir;
 }
 

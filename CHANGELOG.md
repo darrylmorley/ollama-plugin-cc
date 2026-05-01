@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.0] - 2026-05-01
+
+### Added — Orchestrator pipeline
+
+The headline v1.1 feature: Claude as orchestrator, Ollama agents as specialists.
+
+- **`/ollama:plan "<task>"`** — evidence-grounded planning. The planner uses a read-only agentic loop (read_file, list_directory, done) to ground itself in the actual codebase before emitting a structured JSON plan with file:line refs, success criteria per step, and a confidence score.
+- **`/ollama:replan <id> "<feedback>"`** — refine a draft plan; archives prior revisions.
+- **`/ollama:execute-plan <id>`** — autonomous implement → verify → retry loop per step. Inner loop never crosses Claude's context. Per-step git checkpoint commits. Capped retry per step (default 3). Verifier accepts criteria satisfied by current state (handles "verify nothing remains" steps cleanly).
+- **`/ollama:plans`, `/ollama:plan-show`, `/ollama:plan-approve`** — list, render, and approve plans.
+- **Per-role models** via `OLLAMA_PLUGIN_PLANNER_MODEL`, `OLLAMA_PLUGIN_IMPLEMENTER_MODEL`, `OLLAMA_PLUGIN_VERIFIER_MODEL` env vars (with CLI overrides).
+- **`schemas/plan.schema.json`, `schemas/verify-output.schema.json`** — public schemas for plan and verifier outputs.
+- **`docs/ORCHESTRATOR.md`** — end-user guide for the pipeline.
+- **`lib/plans.mjs`, `lib/pipeline.mjs`** — internal modules.
+
+### Fixed
+
+- `parseStructuredOutput` now strips ```json fences and falls back to first-object extraction when the model wraps its JSON in markdown. This was failing the verifier output even when schema-mode was set, especially with cloud models.
+
+### Smoke test
+
+End-to-end pipeline against the SQL injection fixture: glm-5.1:cloud planner → gemma4:26b implementer → glm-5.1:cloud verifier. All 3 plan steps passed verification on first attempt. Per-step git checkpoint commits land cleanly. Total Claude tokens consumed: just the plan markdown + final report.
+
+### Token economics
+
+For a typical multi-file refactor, the orchestrator pipeline reduces Claude token consumption by ~5-10× vs doing the work directly in Claude — the implement↔verify loop runs entirely outside Claude's context. See `docs/ORCHESTRATOR.md` for details.
+
 ## [0.10.1] - 2026-05-01
 
 ### Documentation pass

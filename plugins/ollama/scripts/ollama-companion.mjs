@@ -99,7 +99,8 @@ function printUsage() {
       "  node scripts/ollama-companion.mjs replan <plan-id> \"<feedback>\" [--model <name>] [--json]",
       "  node scripts/ollama-companion.mjs plans [--json]",
       "  node scripts/ollama-companion.mjs plan-show <plan-id> [--json]",
-      "  node scripts/ollama-companion.mjs plan-approve <plan-id> [--json]"
+      "  node scripts/ollama-companion.mjs plan-approve <plan-id> [--json]",
+      "  node scripts/ollama-companion.mjs execute-plan <plan-id> [--implementer <model>] [--verifier <model>] [--max-retries <N>] [--step <N>] [--resume-from <N>] [--dry-run] [--json]"
     ].join("\n")
   );
 }
@@ -1268,6 +1269,108 @@ async function handlePlanShow(argv) {
   outputCommandResult(plan, renderPlanMarkdown(plan), options.json);
 }
 
+async function handleExecutePlan(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["implementer", "verifier", "max-retries", "step", "resume-from", "cwd"],
+    booleanOptions: ["json", "dry-run", "background"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const planId = positionals[0];
+  if (!planId) throw new Error("Usage: ollama-companion execute-plan <plan-id> [flags]");
+  const plan = readPlan(cwd, planId);
+  if (!plan) throw new Error(`Plan ${planId} not found.`);
+
+  // Allow approve-on-execute for ergonomic UX. Reject if plan is already
+  // complete or failed (use replan first).
+  if (plan.status === "complete") throw new Error(`Plan ${planId} is already complete.`);
+  if (plan.status === "executing") throw new Error(`Plan ${planId} is already executing.`);
+
+  const dryRun = Boolean(options["dry-run"]);
+  if (!dryRun) ensureOllamaAvailable(cwd);
+
+  const implementerModel = requireModel(
+    resolveRoleModel("implementer", normalizeRequestedModel(options.implementer)),
+    "implementer"
+  );
+  const verifierModel = requireModel(
+    resolveRoleModel("verifier", normalizeRequestedModel(options.verifier))
+      ?? resolveRoleModel("planner", null),
+    "verifier"
+  );
+  const maxRetries = Number(options["max-retries"] ?? 3);
+  const singleStep = options.step != null ? Number(options.step) : null;
+  const resumeFrom = options["resume-from"] != null ? Number(options["resume-from"]) : 1;
+
+  const allowCommands = process.env.OLLAMA_PLUGIN_RESCUE_ALLOW_COMMANDS;
+  const onProgress = (event) => {
+    const m = typeof event === "string" ? event : event?.message;
+    const phase = typeof event === "object" ? event?.phase : null;
+    if (m) process.stderr.write(`[ollama] ${phase ? `[${phase}] ` : ""}${m}\n`);
+  };
+
+  const { executePlan } = await import("./lib/pipeline.mjs");
+  const report = await executePlan({
+    plan,
+    cwd,
+    implementerModel,
+    verifierModel,
+    maxRetries,
+    singleStep,
+    resumeFrom,
+    dryRun,
+    allowCommands,
+    onProgress
+  });
+
+  const finalPlan = readPlan(cwd, planId);
+  const rendered = renderExecuteReport(finalPlan, report, { implementerModel, verifierModel });
+  outputCommandResult({ plan: finalPlan, report }, rendered, options.json);
+}
+
+function renderExecuteReport(plan, report, models) {
+  const lines = [
+    `# Execute plan ${plan.id}`,
+    "",
+    `**Status:** ${report.status}` + (report.stuckAt != null ? ` (stuck at step ${report.stuckAt})` : ""),
+    `**Implementer:** ${models.implementerModel}`,
+    `**Verifier:** ${models.verifierModel}`,
+    "",
+    "## Steps",
+    ""
+  ];
+  for (const r of report.stepReports) {
+    const prefix = r.status === "complete" ? "✓"
+                 : r.status === "failed"   ? "✗"
+                 : r.status === "skipped"  ? "·"
+                 : r.status === "blocked"  ? "⊘"
+                 : "?";
+    const summary = r.verifier?.summary ? ` — ${r.verifier.summary.slice(0, 160)}` : (r.reason ? ` — ${r.reason}` : "");
+    const attempts = r.attempts ? ` (${r.attempts} attempt${r.attempts > 1 ? "s" : ""})` : "";
+    lines.push(`- ${prefix} step ${r.stepId}: ${r.status}${attempts}${summary}`);
+  }
+  lines.push("");
+  if (report.status === "complete") {
+    lines.push("All steps passed verification. Review the cumulative diff:");
+    lines.push("");
+    lines.push("```");
+    lines.push(`git diff <merge-base>..HEAD  # checkpoint commits per step`);
+    lines.push("```");
+  } else if (report.status === "stuck") {
+    const stuckReport = report.stepReports.find((r) => r.status === "failed");
+    if (stuckReport?.verifier?.remediation) {
+      lines.push(`**Suggested remediation:** ${stuckReport.verifier.remediation}`);
+      lines.push("");
+    }
+    lines.push(`Refine the plan and retry from this step:`);
+    lines.push("");
+    lines.push("```");
+    lines.push(`/ollama:replan ${plan.id} "<your refinement>"`);
+    lines.push(`/ollama:execute-plan ${plan.id} --resume-from ${report.stuckAt}`);
+    lines.push("```");
+  }
+  return lines.join("\n");
+}
+
 async function handlePlanApprove(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -1590,6 +1693,9 @@ async function main() {
       break;
     case "plan-approve":
       await handlePlanApprove(argv);
+      break;
+    case "execute-plan":
+      await handleExecutePlan(argv);
       break;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);

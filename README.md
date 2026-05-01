@@ -116,12 +116,27 @@ directory and takes precedence over `OLLAMA_PLUGIN_DEFAULT_MODEL`.
   progress with `/ollama:status`.
 - **Node.js 18.18 or later** is required to run the companion script.
 
+## Orchestrator pipeline (v0.11+)
+
+Beyond per-task dispatch, the plugin now supports a **plan → execute → review** pipeline that lets Claude delegate multi-step work to a chain of Ollama agents:
+
+```
+/ollama:plan "audit and fix error handling in lib/"     # planner reads the code, emits a structured plan
+# Claude reviews. Looks good.
+/ollama:execute-plan pln_abc                            # implement → verify → retry loop, autonomous per step
+# Claude reviews the cumulative diff.
+```
+
+Three roles, three models (planner/implementer/verifier), Claude only at the gates. Typically 5–10× reduction in Claude tokens for refactors and audit-and-fix work. See [`docs/ORCHESTRATOR.md`](docs/ORCHESTRATOR.md).
+
 ## Documentation
 
+- [`docs/ORCHESTRATOR.md`](docs/ORCHESTRATOR.md) — orchestrator pipeline user guide
 - [`docs/MODELS.md`](docs/MODELS.md) — empirical model recommendations + battle-test results
 - [`docs/API.md`](docs/API.md) — public vs internal surface for v1.x
 - [`docs/SMOKE-TEST.md`](docs/SMOKE-TEST.md) — pre-release verification checklist
 - [`docs/PLAN-v1.md`](docs/PLAN-v1.md) — v0.1 → v1.0 roadmap and status
+- [`docs/PLAN-orchestrator.md`](docs/PLAN-orchestrator.md) — orchestrator design rationale
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes
 
 ## Credits
